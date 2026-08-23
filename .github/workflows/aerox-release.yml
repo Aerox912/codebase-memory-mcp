@@ -1,0 +1,287 @@
+name: Aerox Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-aerox.*'
+
+concurrency:
+  group: aerox-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  preflight:
+    name: Validate release tag and source base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate fork release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-aerox\.[0-9]+$ ]]; then
+            echo "::error::tag must match vX.Y.Z-aerox.N; got '$RELEASE_TAG'"
+            exit 1
+          fi
+          upstream_tag="${RELEASE_TAG%%-aerox.*}"
+          git rev-parse --verify "$upstream_tag^{commit}"
+          git merge-base --is-ancestor "$upstream_tag" "$GITHUB_SHA"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          echo "Release $RELEASE_TAG is based on $upstream_tag at $GITHUB_SHA."
+
+  build-linux-amd64:
+    name: Build and verify Linux amd64
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build with embedded UI
+        run: scripts/build.sh --with-ui --version "$RELEASE_TAG" CC=gcc CXX=g++
+
+      - name: Prepare and package selected release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/ci/prepare-release-candidates.sh linux amd64 \
+            --binary build/c/codebase-memory-mcp \
+            --out-dir release-candidates
+          scripts/gen-third-party-notices.sh release-candidates/linux-amd64/THIRD_PARTY_NOTICES.md
+          selected=release-candidates/linux-amd64/stripped/codebase-memory-mcp
+          selected_sha="$(sha256sum "$selected" | awk '{print $1}')"
+          VERSION="$RELEASE_TAG" scripts/package-release.sh linux amd64 \
+            --selected-binary "$selected" \
+            --expected-sha256 "$selected_sha" \
+            --third-party-notices release-candidates/linux-amd64/THIRD_PARTY_NOTICES.md \
+            --out-dir dist
+
+      - name: Smoke and security checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir smoke
+          tar -xzf dist/codebase-memory-mcp-linux-amd64.tar.gz -C smoke
+          test "$(find smoke -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          actual="$(smoke/codebase-memory-mcp --version 2>&1 | head -n 1)"
+          grep -Fq -- "${RELEASE_TAG#v}" <<<"$actual"
+          scripts/security-strings.sh smoke/codebase-memory-mcp
+
+      - name: Attest Linux release artifact
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/codebase-memory-mcp-linux-amd64.tar.gz
+
+      - name: Upload Linux release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aerox-release-linux-amd64
+          path: dist/codebase-memory-mcp-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows-amd64:
+    name: Build and verify Windows amd64
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: CLANG64
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-zlib
+            make
+            python
+            unzip
+            zip
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Build with embedded UI
+        shell: msys2 {0}
+        run: scripts/build.sh --with-ui --version "$RELEASE_TAG" CC=clang CXX=clang++
+
+      - name: Prepare and package selected release candidate
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          scripts/ci/prepare-release-candidates.sh windows amd64 \
+            --binary build/c/codebase-memory-mcp.exe \
+            --out-dir release-candidates
+          scripts/gen-third-party-notices.sh release-candidates/windows-amd64/THIRD_PARTY_NOTICES.md
+          selected=release-candidates/windows-amd64/stripped/codebase-memory-mcp.exe
+          selected_sha="$(sha256sum "$selected" | awk '{print $1}')"
+          VERSION="$RELEASE_TAG" scripts/package-release.sh windows amd64 \
+            --selected-binary "$selected" \
+            --expected-sha256 "$selected_sha" \
+            --third-party-notices release-candidates/windows-amd64/THIRD_PARTY_NOTICES.md \
+            --out-dir dist
+
+      - name: Smoke and security checks
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir smoke
+          unzip -q dist/codebase-memory-mcp-windows-amd64.zip -d smoke
+          test "$(find smoke -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          actual="$(smoke/codebase-memory-mcp.exe --version 2>&1 | head -n 1)"
+          grep -Fq -- "${RELEASE_TAG#v}" <<<"$actual"
+          scripts/security-strings.sh smoke/codebase-memory-mcp.exe
+
+      - name: Windows Defender scan
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'smoke\codebase-memory-mcp.exe'
+          & 'C:\Program Files\Windows Defender\MpCmdRun.exe' -SignatureUpdate 2>$null
+          $output = & 'C:\Program Files\Windows Defender\MpCmdRun.exe' -Scan -ScanType 3 -File $binary -DisableRemediation
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -eq 2) { throw 'Windows Defender detected a threat in the release binary.' }
+          if ($code -ne 0) { Write-Warning "Windows Defender scan unavailable (exit $code)." }
+
+      - name: Attest Windows release artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/codebase-memory-mcp-windows-amd64.zip
+            dist/codebase-memory-mcp-windows-amd64.mcpb
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aerox-release-windows-amd64
+          path: |
+            dist/codebase-memory-mcp-windows-amd64.zip
+            dist/codebase-memory-mcp-windows-amd64.mcpb
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: [build-linux-amd64, build-windows-amd64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: aerox-release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate release inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            codebase-memory-mcp-linux-amd64.tar.gz
+            codebase-memory-mcp-windows-amd64.mcpb
+            codebase-memory-mcp-windows-amd64.zip
+          )
+          mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          test "${actual[*]}" = "${wanted[*]}"
+
+      - name: Generate SBOM and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/generate-sbom.py "$RELEASE_TAG"
+          mv sbom.json dist/sbom.json
+          (
+            cd dist
+            sha256sum \
+              codebase-memory-mcp-linux-amd64.tar.gz \
+              codebase-memory-mcp-windows-amd64.mcpb \
+              codebase-memory-mcp-windows-amd64.zip \
+              sbom.json > checksums.txt
+          )
+
+      - name: Attest release checksums
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/checksums.txt
+
+      - name: Attest release SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: |
+            dist/codebase-memory-mcp-linux-amd64.tar.gz
+            dist/codebase-memory-mcp-windows-amd64.zip
+          sbom-path: dist/sbom.json
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release already exists: $RELEASE_TAG"
+            exit 1
+          fi
+          upstream_tag="${RELEASE_TAG%%-aerox.*}"
+          {
+            echo "Maintained Aerox fork build of Codebase Memory."
+            echo
+            echo "Source base: \`$upstream_tag\`"
+            echo "Fork tag: \`$RELEASE_TAG\`"
+            echo
+            echo "This release contains the native Windows amd64 and Linux amd64 binaries used by agent-system."
+          } > release-notes.md
+          gh release create "$RELEASE_TAG" \
+            dist/codebase-memory-mcp-linux-amd64.tar.gz \
+            dist/codebase-memory-mcp-windows-amd64.mcpb \
+            dist/codebase-memory-mcp-windows-amd64.zip \
+            dist/checksums.txt \
+            dist/sbom.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Codebase Memory $RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --prerelease
