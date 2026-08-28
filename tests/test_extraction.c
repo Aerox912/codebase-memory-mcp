@@ -74,6 +74,27 @@ static int count_defs_with_label(CBMFileResult *r, const char *label) {
     return count;
 }
 
+static int count_defs_named(CBMFileResult *r, const char *label, const char *name) {
+    int count = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, label) == 0 &&
+            strcmp(r->defs.items[i].name, name) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_calls_named(CBMFileResult *r, const char *callee) {
+    int count = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
 /* Convenience: extract, assert no error, return result. Caller frees. */
 static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *proj,
                               const char *path) {
@@ -1152,6 +1173,69 @@ TEST(form_procedure) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT(has_def(r, "Function", "doSomething"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- Oracle PL/SQL --- */
+TEST(plsql_package_and_call) {
+    const char *src =
+        "CREATE OR REPLACE PACKAGE BODY emp_pkg AS\n"
+        "  FUNCTION hire(p_name VARCHAR2) RETURN NUMBER IS\n"
+        "    v_sal NUMBER;\n"
+        "  BEGIN\n"
+        "    v_sal := util_pkg.calc_salary(p_name);\n"
+        "    IF v_sal > 0 THEN\n"
+        "      RETURN v_sal;\n"
+        "    END IF;\n"
+        "    RAISE no_data_found;\n"
+        "  END;\n"
+        "END emp_pkg;\n"
+        "/\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PLSQL, "t", "emp_pkg.pkb");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Class", "emp_pkg"));
+    ASSERT(has_def_any(r, "hire"));
+    ASSERT(has_call(r, "util_pkg.calc_salary"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(plsql_standalone_function) {
+    /* create_function wraps a body (which ends with END) plus an outer END. */
+    const char *src = "CREATE OR REPLACE FUNCTION get_bonus RETURN NUMBER IS\n"
+                      "BEGIN\n"
+                      "  RETURN 1;\n"
+                      "END;\n"
+                      "END get_bonus;\n"
+                      "/\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PLSQL, "t", "get_bonus.fnc");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "get_bonus"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(plsql_create_type_as_object_limitation) {
+    /* Known grammar limitation: CREATE TYPE ... AS OBJECT yields ERROR nodes
+     * (AndreasMaierDe/tree-sitter-plsql @ 28aebef209be). Documented in
+     * tests/fixtures/plsql/create_type_as_object_limitation.tps — do not expect
+     * a Class def until the upstream grammar improves. */
+    const char *src = "CREATE OR REPLACE TYPE address_t AS OBJECT (\n"
+                      "  street VARCHAR2(100),\n"
+                      "  city   VARCHAR2(50)\n"
+                      ");\n"
+                      "/\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PLSQL, "t", "address.tps");
+    ASSERT_NOT_NULL(r);
+    /* Pin the limitation positively: the tree contains ERROR/MISSING nodes.
+     * When a grammar upgrade clears this, this assertion goes RED — then
+     * expect the Class def here instead of the absence below. */
+    ASSERT(r->parse_incomplete);
+    /* Must not crash; Class extraction is best-effort and currently absent. */
+    ASSERT(!has_def(r, "Class", "address_t"));
     cbm_free_result(r);
     PASS();
 }
@@ -2881,6 +2965,103 @@ TEST(vue_imports_basic) {
     PASS();
 }
 
+TEST(vue_embedded_structure_issue1410) {
+    const char *src = "<template><div>caf\xC3\xA9</div></template>\r\n"
+                      "<script>\r\n"
+                      "import { external } from './dep.js';\r\n"
+                      "function normalFn() { return callee(); }\r\n"
+                      "</script>\r\n"
+                      "<script setup lang=\"ts\">class Widget {}\r\n"
+                      "function setupFn(): void { callee(); }</script>\r\n";
+    CBMFileResult *r = extract(src, CBM_LANG_VUE, "t", "App.vue");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 2);
+    ASSERT_EQ(count_defs_with_label(r, "Class"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "normalFn"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "setupFn"), 1);
+    ASSERT_EQ(count_defs_named(r, "Class", "Widget"), 1);
+    ASSERT_EQ(count_calls_named(r, "callee"), 2);
+    ASSERT_EQ(r->imports.count, 1);
+    ASSERT(has_import(r, "dep.js"));
+
+    const CBMDefinition *normal = NULL;
+    const CBMDefinition *widget = NULL;
+    const CBMDefinition *setup = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "normalFn") == 0) {
+            normal = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "Widget") == 0) {
+            widget = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "setupFn") == 0) {
+            setup = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(normal);
+    ASSERT_NOT_NULL(widget);
+    ASSERT_NOT_NULL(setup);
+    ASSERT_EQ(normal->start_line, 4);
+    ASSERT_EQ(widget->start_line, 6);
+    ASSERT_EQ(setup->start_line, 7);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(vue_embedded_structure_negative_controls_issue1410) {
+    static const char *sources[] = {
+        "<script lang=\"coffee\">function hidden() { forbidden(); }</script>\n",
+        "<script src=\"./external.js\">function hidden() { forbidden(); }</script>\n",
+        "<template><p>scriptless</p></template>\n",
+    };
+    for (int i = 0; i < 3; i++) {
+        CBMFileResult *r = extract(sources[i], CBM_LANG_VUE, "t", "Negative.vue");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+        ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+        ASSERT_EQ(count_defs_with_label(r, "Class"), 0);
+        ASSERT_EQ(r->calls.count, 0);
+        ASSERT_EQ(r->imports.count, 0);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+TEST(vue_embedded_structure_host_controls_issue1410) {
+    CBMFileResult *plain = extract("function plainTs(): void { target(); }\n", CBM_LANG_TYPESCRIPT,
+                                   "t", "plain.ts");
+    ASSERT_NOT_NULL(plain);
+    ASSERT_FALSE(plain->has_error);
+    ASSERT_EQ(count_defs_named(plain, "Function", "plainTs"), 1);
+    ASSERT_EQ(count_calls_named(plain, "target"), 1);
+    cbm_free_result(plain);
+
+    static const struct {
+        CBMLanguage language;
+        const char *path;
+        const char *source;
+    } hosts[] = {
+        {CBM_LANG_SVELTE, "Control.svelte",
+         "<script>import value from './svelte.js'; function hidden() { target(); }</script>\n"},
+        {CBM_LANG_HTML, "control.html",
+         "<script>import value from './html.js'; function hidden() { target(); }</script>\n"},
+        {CBM_LANG_ASTRO, "Control.astro",
+         "---\nimport value from './astro.js'; function hidden() { target(); }\n---\n"},
+    };
+    for (int i = 0; i < 3; i++) {
+        CBMFileResult *r = extract(hosts[i].source, hosts[i].language, "t", hosts[i].path);
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+        ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+        ASSERT_EQ(r->calls.count, 0);
+        ASSERT_EQ(r->imports.count, 1);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
 TEST(html_imports_basic) {
     /* Plain HTML with inline ES module imports — same generic walker. */
     CBMFileResult *r = extract("<!DOCTYPE html><html><head>\n"
@@ -3586,7 +3767,7 @@ static bool any_call_arg_resolves_to(CBMFileResult *r, const char *url) {
 
 TEST(extract_c_url_builder_gated_issue1009) {
     CBMFileResult *r = extract("static const char *cfg_path(void) {\n"
-                               "  return \"/etc/myapp/conf.d\";\n"
+                               "  return \"/srv/myapp/conf.d\";\n"
                                "}\n"
                                "void init(void) {\n"
                                "  parse_config(cfg_path());\n"
@@ -3594,7 +3775,7 @@ TEST(extract_c_url_builder_gated_issue1009) {
                                CBM_LANG_C, "t", "conf.c");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
-    ASSERT_FALSE(any_call_arg_resolves_to(r, "/etc/myapp/conf.d"));
+    ASSERT_FALSE(any_call_arg_resolves_to(r, "/srv/myapp/conf.d"));
     cbm_free_result(r);
     PASS();
 }
@@ -5922,6 +6103,9 @@ SUITE(extraction) {
     RUN_TEST(matlab_function);
     RUN_TEST(lean_function);
     RUN_TEST(form_procedure);
+    RUN_TEST(plsql_package_and_call);
+    RUN_TEST(plsql_standalone_function);
+    RUN_TEST(plsql_create_type_as_object_limitation);
     RUN_TEST(wolfram_function);
     RUN_TEST(magma_function);
 
@@ -6052,6 +6236,9 @@ SUITE(extraction) {
     RUN_TEST(svelte_imports_basic);
     RUN_TEST(svelte_imports_no_script);
     RUN_TEST(vue_imports_basic);
+    RUN_TEST(vue_embedded_structure_issue1410);
+    RUN_TEST(vue_embedded_structure_negative_controls_issue1410);
+    RUN_TEST(vue_embedded_structure_host_controls_issue1410);
     RUN_TEST(html_imports_basic);
 
     /* config_extraction_test.go ports */

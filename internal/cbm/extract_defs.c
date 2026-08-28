@@ -1051,6 +1051,18 @@ TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang) {
             }
         }
 
+        /* PL/SQL: create_function / create_procedure / function_* / procedure_*
+         * carry fnc_name / prc_name, not the generic name field. */
+        if (lang == CBM_LANG_PLSQL) {
+            TSNode nm = ts_node_child_by_field_name(node, TS_FIELD("fnc_name"));
+            if (ts_node_is_null(nm)) {
+                nm = ts_node_child_by_field_name(node, TS_FIELD("prc_name"));
+            }
+            if (!ts_node_is_null(nm)) {
+                return nm;
+            }
+        }
+
         /* Smali (no `name` field): method_definition > method_signature >
          * method_identifier holds the method name. */
         if (lang == CBM_LANG_SMALI && strcmp(kind, "method_definition") == 0) {
@@ -4253,6 +4265,16 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
             name_node = ts_node_child_by_field_name(node, TS_FIELD("component"));
         } else if (strcmp(kind, "type_declaration") == 0) {
             name_node = ts_node_child_by_field_name(node, TS_FIELD("type"));
+        }
+    }
+    // PL/SQL: package / type / trigger names use dedicated fields, not `name`.
+    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_PLSQL) {
+        name_node = ts_node_child_by_field_name(node, TS_FIELD("package_name"));
+        if (ts_node_is_null(name_node)) {
+            name_node = ts_node_child_by_field_name(node, TS_FIELD("type_name"));
+        }
+        if (ts_node_is_null(name_node)) {
+            name_node = ts_node_child_by_field_name(node, TS_FIELD("trigger_name"));
         }
     }
     // Verilog/SystemVerilog (FIELD_COUNT 0): module/class/interface/package use a
@@ -7533,6 +7555,19 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
     free(s.data);
 }
 
+void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
+    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+    if (!spec) {
+        return;
+    }
+
+    // Walk AST for function/class definitions
+    walk_defs(ctx, ctx->root, spec, 0);
+
+    // Extract module-level variables
+    extract_variables(ctx, ctx->root, spec);
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -7554,9 +7589,5 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.is_test = ctx->result->is_test_file;
     cbm_defs_push(&ctx->result->defs, a, mod);
 
-    // Walk AST for function/class definitions
-    walk_defs(ctx, ctx->root, spec, 0);
-
-    // Extract module-level variables
-    extract_variables(ctx, ctx->root, spec);
+    cbm_extract_definitions_without_module(ctx);
 }
