@@ -11,3 +11,13 @@ internal/cbm/vendored/grammars/**/scanner.c linguist-generated=true diff=false
 # the git hooks are extensionless and need explicit entries. (#1272)
 scripts/git-hooks/commit-msg   text eol=lf
 scripts/hooks/pre-commit       text eol=lf
+
+# The vendored-integrity gate hashes exact bytes. Keep both the manifest and
+# covered vendored trees stable across Windows, WSL, and native Linux clones.
+scripts/vendored-checksums.txt text eol=lf
+internal/cbm/vendored/** -text
+vendored/** -text
+
+# Chialisp grammar corpus: one case asserts CRLF comment termination, so this
+# file must keep its exact bytes on every platform (no eol conversion). (#919)
+tools/tree-sitter-chialisp/test/corpus/comments.txt -text

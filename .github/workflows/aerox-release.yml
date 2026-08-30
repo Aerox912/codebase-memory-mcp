@@ -92,7 +92,7 @@ jobs:
           scripts/security-strings.sh smoke/codebase-memory-mcp
 
       - name: Attest Linux release artifact
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/codebase-memory-mcp-linux-amd64.tar.gz
 
@@ -177,7 +177,7 @@ jobs:
           if ($code -ne 0) { Write-Warning "Windows Defender scan unavailable (exit $code)." }
 
       - name: Attest Windows release artifacts
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/codebase-memory-mcp-windows-amd64.zip
@@ -243,7 +243,7 @@ jobs:
           )
 
       - name: Attest release checksums
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/checksums.txt
 
