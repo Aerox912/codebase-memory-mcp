@@ -40,9 +40,17 @@ jobs:
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
           echo "Release $RELEASE_TAG is based on $upstream_tag at $GITHUB_SHA."
 
+  test:
+    needs: preflight
+    uses: ./.github/workflows/_test.yml
+    with:
+      skip_perf: false
+      broad_platforms: true
+      shard_suites: true
+
   build-linux-amd64:
     name: Build and verify Linux amd64
-    needs: preflight
+    needs: [preflight, test]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -106,7 +114,7 @@ jobs:
 
   build-windows-amd64:
     name: Build and verify Windows amd64
-    needs: preflight
+    needs: [preflight, test]
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
