@@ -13,6 +13,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 driver="$ROOT/scripts/run-tests-parallel.sh"
 scheduler="$ROOT/scripts/run-test-wave.py"
+# Own the interpreter PID, not a Windows execution-alias launcher.
+python_executable="$(python3 -c 'import sys; print(sys.executable)')"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/cbm-parallel-harness.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
@@ -162,10 +164,11 @@ elif suite in ("stubborn_tree", "timeout_exit_race"):
             sys.executable,
             "-c",
             (
-                "import os,signal,time;"
+                "import os,signal,threading;"
                 "signal.signal(signal.SIGTERM,signal.SIG_IGN) "
                 "if os.name != 'nt' else None;"
-                "time.sleep(30)"
+                # The cleanup proof may outlast 30s; only its owner may end this child.
+                "threading.Event().wait()"
             ),
         ]
     )
@@ -188,7 +191,7 @@ python3 "$scheduler" \
     --timeout 5 \
     --slow-timeout 5 \
     --kill-grace 1 \
-    "$(command -v python3)" "$fixture/fake_runner.py" "$fixture/descendant.pid"
+    "$python_executable" "$fixture/fake_runner.py" "$fixture/descendant.pid"
 
 if [ "$(wc -l <"$fixture/results.txt" | tr -d ' ')" -ne 32 ] ||
     grep -qvE '^pass_[0-9]+ rc=0 pass=1 fail=0 skip=0 secs=[0-9]+$' \
@@ -208,7 +211,7 @@ python3 "$scheduler" \
     --timeout 1 \
     --slow-timeout 1 \
     --kill-grace 1 \
-    "$(command -v python3)" "$fixture/fake_runner.py" "$fixture/descendant.pid"
+    "$python_executable" "$fixture/fake_runner.py" "$fixture/descendant.pid"
 
 if ! grep -qE '^hang_after_summary rc=124 pass=1 fail=0 skip=0 secs=[0-9]+$' \
     "$fixture/results.txt"; then
@@ -239,7 +242,7 @@ python3 "$scheduler" \
     --timeout 1 \
     --slow-timeout 1 \
     --kill-grace 1 \
-    "$(command -v python3)" "$fixture/fake_runner.py" "$fixture/descendant.pid"
+    "$python_executable" "$fixture/fake_runner.py" "$fixture/descendant.pid"
 
 python3 - "$fixture/descendant.pid" <<'PY'
 import ctypes
@@ -292,7 +295,7 @@ printf '%s\n' pass_after >"$fixture/suites.txt"
 : >"$fixture/results.txt"
 mkdir "$fixture/barrier"
 : >"$fixture/barrier/pass_after.hold"
-python3 - "$scheduler" "$fixture" "$(command -v python3)" <<'PY'
+python3 - "$scheduler" "$fixture" "$python_executable" <<'PY'
 from __future__ import annotations
 
 import pathlib
@@ -362,7 +365,7 @@ printf '%s\n' timeout_exit_race >"$fixture/suites.txt"
 : >"$fixture/results.txt"
 rm -f "$fixture/descendant.pid"
 : >"$fixture/barrier/timeout_exit_race.hold"
-python3 - "$scheduler" "$fixture" "$(command -v python3)" <<'PY'
+python3 - "$scheduler" "$fixture" "$python_executable" <<'PY'
 from __future__ import annotations
 
 import ctypes
