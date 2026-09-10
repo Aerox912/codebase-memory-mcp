@@ -10262,7 +10262,7 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
         }
         char logdir[CBM_SZ_1K];
         snprintf(logdir, sizeof(logdir), "%s/logs", cdir);
-        cbm_mkdir_p(logdir, 0755);
+        cbm_mkdir_p_ex(logdir, 0755, CBM_MKDIR_FOLLOW_OWNED);
         snprintf(path, sizeof(path), "%s/%s-%lld.log", logdir, project ? project : "index",
                  (long long)time(NULL));
     }
@@ -10481,7 +10481,7 @@ static void supervisor_tmp_path(char *out, size_t out_sz, const char *suffix) {
     if (cdir && cdir[0]) {
         char logdir[CBM_SZ_1K];
         snprintf(logdir, sizeof(logdir), "%s/logs", cdir);
-        cbm_mkdir_p(logdir, 0755);
+        cbm_mkdir_p_ex(logdir, 0755, CBM_MKDIR_FOLLOW_OWNED);
         snprintf(out, out_sz, "%s/.supervisor-%d%s", logdir, (int)getpid(), suffix);
     } else {
         snprintf(out, out_sz, ".supervisor-%d%s", (int)getpid(), suffix);
@@ -11209,6 +11209,49 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         if (cbm_pipeline_had_format_migration(p)) {
             yyjson_mut_obj_add_bool(doc, root, "format_migration", true);
         }
+    } else if (rc == CBM_PIPELINE_ABORT_OVER_BUDGET) {
+        /* Decision A (#1997 #832): resident memory stayed above the budget
+         * after back-pressure and one confirmation cycle, so the run stopped
+         * before publication. Name the cause, the numbers and the fact that
+         * the previous index still serves — the generic "check repo_path"
+         * hint below sent people debugging a path that was fine. */
+        int budget_mb = (int)(cbm_mem_budget() / (1024 * 1024));
+        int peak_rss_mb = (int)(cbm_mem_peak_rss() / (1024 * 1024));
+        char budget_text[CBM_SZ_32];
+        char peak_text[CBM_SZ_32];
+        (void)snprintf(budget_text, sizeof(budget_text), "%d", budget_mb);
+        (void)snprintf(peak_text, sizeof(peak_text), "%d", peak_rss_mb);
+        cbm_log_error("index.abort", "reason", "over_memory_budget", "project", project_name,
+                      "budget_mb", budget_text, "peak_rss_mb", peak_text);
+        yyjson_mut_obj_add_str(doc, root, "status", "error");
+        yyjson_mut_obj_add_str(doc, root, "reason", "over_memory_budget");
+        yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        yyjson_mut_obj_add_int(doc, root, "budget_mb", budget_mb);
+        yyjson_mut_obj_add_int(doc, root, "peak_rss_mb", peak_rss_mb);
+        yyjson_mut_obj_add_str(doc, root, "hint",
+                               "Indexing stopped: resident memory stayed above the budget after "
+                               "backpressure; no partial graph was published and the previous "
+                               "index still serves. Raise CBM_MEM_BUDGET_MB, lower CBM_WORKERS, "
+                               "or exclude large subtrees.");
+    } else if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
+        /* The truthful abort message (#2020): the old generic "check repo_path"
+         * hint sent people debugging a path that was fine, when the run
+         * aborted pre-publication (semantic inputs changed mid-run, or a
+         * discovery/manifest phase failed transiently) and the previous index
+         * is intact. A 99-test cascade on the Windows leg traced back to
+         * exactly this — the response said error, but not which kind. */
+        yyjson_mut_obj_add_str(doc, root, "status", "aborted_previous_preserved");
+        yyjson_mut_obj_add_str(doc, root, "hint",
+                               "Indexing aborted before publication; the previous index is "
+                               "intact and still serving. Causes: files changed while the run "
+                               "was in flight, or a discovery/manifest phase failed "
+                               "transiently. Retry; if it repeats, check the run log.");
+    } else if (rc == CBM_PIPELINE_PERSIST_FAILED) {
+        yyjson_mut_obj_add_str(doc, root, "status", "persist_failed");
+        yyjson_mut_obj_add_str(doc, root, "hint",
+                               "The validated staging database could not be published. Check "
+                               "free disk space and permissions on the cache directory; the "
+                               "previous index may have been rolled back.");
     } else {
         yyjson_mut_obj_add_str(doc, root, "status", "error");
         yyjson_mut_obj_add_str(doc, root, "hint",
@@ -14817,7 +14860,8 @@ static bool mcp_command_output_path(char out[CBM_SZ_2K]) {
     int written;
     if (cache && cache[0]) {
         written = snprintf(directory, sizeof(directory), "%s/logs", cache);
-        if (written <= 0 || written >= (int)sizeof(directory) || !cbm_mkdir_p(directory, 0700)) {
+        if (written <= 0 || written >= (int)sizeof(directory) ||
+            !cbm_mkdir_p_ex(directory, 0700, CBM_MKDIR_FOLLOW_OWNED)) {
             return false;
         }
     } else {
