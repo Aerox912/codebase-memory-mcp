@@ -1496,15 +1496,11 @@ static uid_t posix_compute_ancestor_overflow_uid(void) {
     return (uid_t)overflow;
 }
 
-static uid_t g_posix_overflow_cached = POSIX_NO_OVERFLOW_UID;
-static pthread_once_t g_posix_overflow_once = PTHREAD_ONCE_INIT;
-static void posix_overflow_init_once(void) {
-    g_posix_overflow_cached = posix_compute_ancestor_overflow_uid();
-}
 #endif /* __linux__ */
 
 /* The overflow uid tolerated for ancestors in this process, or
- * POSIX_NO_OVERFLOW_UID when none. Derived once from immutable /proc state. */
+ * POSIX_NO_OVERFLOW_UID when none. Re-read namespace state: a child can unshare
+ * after inheriting a parent's previously computed ownership decision. */
 static uid_t posix_ancestor_overflow_uid(void) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     if (g_posix_overflow_override_active) {
@@ -1512,8 +1508,7 @@ static uid_t posix_ancestor_overflow_uid(void) {
     }
 #endif
 #if defined(__linux__)
-    (void)pthread_once(&g_posix_overflow_once, posix_overflow_init_once);
-    return g_posix_overflow_cached;
+    return posix_compute_ancestor_overflow_uid();
 #else
     return POSIX_NO_OVERFLOW_UID;
 #endif
