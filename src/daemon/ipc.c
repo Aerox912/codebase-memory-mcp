@@ -4742,8 +4742,11 @@ static bool win_private_directory_tree_secure(const wchar_t *directory_path) {
             DWORD attributes = GetFileAttributesW(path);
             if (attributes == INVALID_FILE_ATTRIBUTES) {
                 DWORD error = GetLastError();
-                ok = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) &&
-                     CreateDirectoryW(path, &security.directory_attributes) != 0;
+                ok = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+                if (ok && !CreateDirectoryW(path, &security.directory_attributes)) {
+                    // Another cold client may have created it; validate it below.
+                    ok = GetLastError() == ERROR_ALREADY_EXISTS;
+                }
             }
             /* Ancestors are observe-only and must already be secure.  The
              * final current-user directory is intentionally handled below by
