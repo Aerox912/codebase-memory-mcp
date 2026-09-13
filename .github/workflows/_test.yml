@@ -121,6 +121,17 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
             echo "could not lift the userns restriction; namespace tests will skip"
+          # Then SAY whether it worked. The runner prints per-shard aggregates
+          # ("N passed, M skipped") and never individual test names, so a
+          # namespace test that silently returns to skipping is invisible in a
+          # green log -- the same false assurance that let #1830 ship with a
+          # test that never executed. This line is the evidence. Probed exactly
+          # as the test does it: unprivileged, no sudo.
+          if unshare -U -r true 2>/dev/null; then
+            echo "CBM_USERNS_AVAILABLE=yes"
+          else
+            echo "CBM_USERNS_AVAILABLE=no (namespace-dependent tests will skip)"
+          fi
 
       - name: Install ccache (macOS)
         if: startsWith(matrix.os, 'macos')
