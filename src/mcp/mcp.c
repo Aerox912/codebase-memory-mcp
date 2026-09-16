@@ -11228,11 +11228,34 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
         yyjson_mut_obj_add_int(doc, root, "budget_mb", budget_mb);
         yyjson_mut_obj_add_int(doc, root, "peak_rss_mb", peak_rss_mb);
-        yyjson_mut_obj_add_str(doc, root, "hint",
-                               "Indexing stopped: resident memory stayed above the budget after "
-                               "backpressure; no partial graph was published and the previous "
-                               "index still serves. Raise CBM_MEM_BUDGET_MB, lower CBM_WORKERS, "
-                               "or exclude large subtrees.");
+        /* A CONCRETE retry value, because "raise CBM_MEM_BUDGET_MB" alone makes
+         * the caller guess — and the obvious guess is wrong. peak_rss_mb is
+         * where the run was STOPPED (it is pinned just above the budget by
+         * construction), not what the repo needs, so retrying at peak+10% fails
+         * again. Measured 2026-09-13 on the linux kernel: aborted at 25622 MB
+         * against a 24576 MB budget, but completing it actually took 31.75 GB —
+         * 1.32x the budget, 1.24x the reported peak. Suggest 1.5x the budget so
+         * the first retry has a real chance, and say plainly that the peak is a
+         * floor rather than a requirement. */
+        /* (3*b+1)/2 rather than b + b/2: integer division makes the latter
+         * degenerate to b for b == 1, so the "suggestion" would repeat the
+         * budget that just failed. Rounding up keeps it strictly larger for
+         * every positive budget. */
+        int suggested_budget_mb = budget_mb > 0 ? (budget_mb * 3 + 1) / 2 : 0;
+        char hint_text[CBM_SZ_512];
+        (void)snprintf(hint_text, sizeof(hint_text),
+                       "Indexing stopped: resident memory stayed above the budget after "
+                       "backpressure; no partial graph was published and the previous index "
+                       "still serves. peak_rss_mb is where indexing was STOPPED, not what this "
+                       "repo needs — the real requirement is higher, so retrying just above the "
+                       "peak will fail again. Retry with CBM_MEM_BUDGET_MB=%d (1.5x the current "
+                       "budget) if the machine has the RAM, or lower CBM_WORKERS, or exclude "
+                       "large subtrees.",
+                       suggested_budget_mb);
+        if (suggested_budget_mb > 0) {
+            yyjson_mut_obj_add_int(doc, root, "suggested_budget_mb", suggested_budget_mb);
+        }
+        yyjson_mut_obj_add_strcpy(doc, root, "hint", hint_text);
     } else if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
         /* The truthful abort message (#2020): the old generic "check repo_path"
          * hint sent people debugging a path that was fine, when the run
@@ -17427,6 +17450,16 @@ static void register_watcher_if_enabled(cbm_mcp_server_t *srv) {
 }
 
 /* Background auto-index thread function */
+/* Extraction builds a THREAD-LOCAL node-type bitset cache (cbm_kind_in_set).
+ * Every worker thread that runs extraction must free that cache before it exits,
+ * or the calloc'd bitsets are orphaned when the thread's TLS is torn down and
+ * LeakSanitizer reports them at process exit. Parallel workers do this in
+ * pass_parallel.c; the in-process (sequential) auto-index runs extraction on
+ * THIS short-lived thread, so it must free its own cache too. Declared extern
+ * (not via internal/cbm/helpers.h) to avoid pulling the extraction layer's
+ * header into the MCP TU — the same pattern test_main.c uses for teardown. */
+extern void cbm_kind_in_set_free_cache(void);
+
 static void *autoindex_thread(void *arg) {
     cbm_mcp_server_t *srv = (cbm_mcp_server_t *)arg;
 
@@ -17466,7 +17499,8 @@ static void *autoindex_thread(void *arg) {
     cbm_pipeline_unlock();
 
     cbm_pipeline_free(p);
-    cbm_mem_collect(); /* return mimalloc pages to OS after indexing (in-process only) */
+    cbm_kind_in_set_free_cache(); /* free THIS thread's extraction bitset cache (see above) */
+    cbm_mem_collect();            /* return mimalloc pages to OS after indexing (in-process only) */
 
     if (rc == 0) {
         cbm_log_info("autoindex.done", "project", srv->session_project);
@@ -17565,9 +17599,13 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
         char limit[32];
         (void)snprintf(files, sizeof(files), "%d", file_count);
         (void)snprintf(limit, sizeof(limit), "%d", file_limit);
+        char root_disp[CBM_SZ_1K];
+        (void)snprintf(root_disp, sizeof(root_disp), "%s", srv->session_root);
+        cbm_normalize_path_sep(
+            root_disp); /* forward-slash paths in diagnostics (Windows \\ -> /) */
         cbm_log_warn("autoindex.skip", "reason",
                      file_count >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
-                     files, "limit", limit);
+                     files, "limit", limit, "root", root_disp);
         return;
     }
 
