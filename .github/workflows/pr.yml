@@ -82,7 +82,11 @@ jobs:
             FILES=$(git --git-dir="$CHANGES_GIT" diff --name-only --no-renames FETCH_HEAD^1 FETCH_HEAD)
           fi
           printf '%s\n' "$FILES"
-          if printf '%s\n' "$FILES" | grep -qE '^(src/|internal/|install\.(sh|ps1)|scripts/build\.sh|scripts/smoke-test\.sh|scripts/smoke-local\.sh|scripts/smoke-fixture-server\.py|scripts/gen-third-party-notices\.sh|scripts/env\.sh|test-infrastructure/vm/(vm-smoke\.sh|windows-user-path-guard\.ps1)|Makefile\.cbm)'; then
+          # A here-string, not a pipe: under this shell's pipefail, grep -q
+          # exits on its first match, printf dies of SIGPIPE once the list
+          # outgrows the pipe buffer, and the MATCH is then reported as a
+          # failure -- product=false, smoke skipped, on the largest PRs.
+          if grep -qE '^(src/|internal/|install\.(sh|ps1)|scripts/build\.sh|scripts/smoke-test\.sh|scripts/smoke-local\.sh|scripts/smoke-fixture-server\.py|scripts/gen-third-party-notices\.sh|scripts/env\.sh|test-infrastructure/vm/(vm-smoke\.sh|windows-user-path-guard\.ps1)|Makefile\.cbm)' <<<"$FILES"; then
             echo "product=true" >> "$GITHUB_OUTPUT"
           else
             echo "product=false" >> "$GITHUB_OUTPUT"
