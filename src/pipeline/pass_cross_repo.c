@@ -1361,9 +1361,9 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
         len += (size_t)snprintf(json + len, cap - len, "%s\"%s\"", i ? "," : "",
                                 targets[i] ? targets[i] : "");
     }
-    int total = result->http_edges + result->async_edges + result->channel_edges +
-                result->grpc_edges + result->graphql_edges + result->trpc_edges;
     if (len < cap) {
+        int total = result->http_edges + result->async_edges + result->channel_edges +
+                    result->grpc_edges + result->graphql_edges + result->trpc_edges;
         len += (size_t)snprintf(json + len, cap - len,
                                 "],\"projects_scanned\":%d,\"total_cross_edges\":%d,"
                                 "\"skipped_projects\":%d}",
