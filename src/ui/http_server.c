@@ -160,6 +160,10 @@ static void handle_ui_config(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 /* ── Server state ─────────────────────────────────────────────── */
 
 #define MAX_INDEX_JOBS 4
+/* Capacity of the buffer POST /api/index resolves the root into, and of the
+ * job field that buffer is copied to: the job carries the resolved string
+ * whole, so the path handed to the daemon is the one the route checked. */
+#define INDEX_JOB_ROOT_CAP 4096
 
 enum {
     HTTP_RUN_IDLE = 0,
@@ -170,7 +174,7 @@ enum {
 
 typedef struct {
     cbm_http_server_t *server;
-    char root_path[1024];
+    char root_path[INDEX_JOB_ROOT_CAP]; /* resolved form, see handle_index_start */
     char project_name[256];
     atomic_int status; /* 0=idle, 1=running, 2=done, 3=error */
     char error_msg[256];
@@ -1182,7 +1186,7 @@ static void handle_index_start(cbm_http_server_t *server, cbm_http_conn_t *c,
      * it accepted roots the MCP path refused — an operator's boundary held on one
      * entry point and not the other. Canonicalize first: the policy is defined
      * over resolved paths, and a symlink would otherwise launder the verdict. */
-    char canonical_root[4096];
+    char canonical_root[INDEX_JOB_ROOT_CAP];
     char boundary_err[1024];
     if (!cbm_canonical_path(rpath, canonical_root, sizeof(canonical_root))) {
         yyjson_doc_free(doc);
@@ -1196,6 +1200,15 @@ static void handle_index_start(cbm_http_server_t *server, cbm_http_conn_t *c,
         char escaped[1024];
         cbm_json_escape(escaped, (int)sizeof(escaped), boundary_err);
         cbm_http_replyf(c, 403, g_cors_json, "{\"error\":\"%s\"}", escaped);
+        return;
+    }
+    /* The job carries exactly the string the checks above ran on. The field
+     * has the resolved buffer's capacity, so a resolved path always fits; the
+     * check keeps a resized field from ever handing the worker a cut-off path
+     * instead of the one that was checked. */
+    if (strlen(canonical_root) >= INDEX_JOB_ROOT_CAP) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"root_path too long\"}");
         return;
     }
 
@@ -1226,7 +1239,7 @@ static void handle_index_start(cbm_http_server_t *server, cbm_http_conn_t *c,
         job->thread_started = false;
     }
     job->server = server;
-    snprintf(job->root_path, sizeof(job->root_path), "%s", rpath);
+    snprintf(job->root_path, sizeof(job->root_path), "%s", canonical_root);
     snprintf(job->project_name, sizeof(job->project_name), "%s", project_name);
     job->error_msg[0] = '\0';
     atomic_store(&job->status, 1);
@@ -1258,14 +1271,15 @@ static void handle_index_status(cbm_http_server_t *server, cbm_http_conn_t *c) {
         if (pos > 1)
             http_appendf(buf, sizeof(buf), &pos, ",");
         const char *ss = st == 1 ? "indexing" : st == 2 ? "done" : "error";
-        /* root_path comes from POST /api/index and is up to 1023 bytes, so four
-         * occupied slots exceed this buffer. http_appendf pins pos to
-         * sizeof(buf) on truncation, so the separator and the close have to go
-         * through it as well rather than indexing raw. Both fields are free-form,
-         * so escape them — a quote in a path would otherwise end its JSON string
-         * early. */
-        /* Escaping can double each byte: root_path is 1024, error_msg 256. */
-        char esc_path[2048];
+        /* root_path is the resolved root POST /api/index stored, up to
+         * INDEX_JOB_ROOT_CAP - 1 bytes, so one long path already exceeds this
+         * buffer. http_appendf pins pos to sizeof(buf) on truncation, so the
+         * separator and the close have to go through it as well rather than
+         * indexing raw. Both fields are free-form, so escape them — a quote in a
+         * path would otherwise end its JSON string early. */
+        /* Escaping can double each byte: root_path is INDEX_JOB_ROOT_CAP,
+         * error_msg 256. */
+        char esc_path[2 * INDEX_JOB_ROOT_CAP];
         char esc_error[512];
         cbm_json_escape(esc_path, (int)sizeof(esc_path), server->index_jobs[i].root_path);
         cbm_json_escape(esc_error, (int)sizeof(esc_error),
