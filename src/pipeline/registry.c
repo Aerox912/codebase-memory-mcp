@@ -947,7 +947,9 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     const char *derived = simple_name(qualified_name);
     index_under_name(r, derived, owned_qn);
     /* '#' is a QN fence, and extract_defs.c's rust_cfg_qualified_name is the
-     * only thing in the tree that mints one today. A grammar that starts
+     * only thing in the tree that mints one on a REGISTERED symbol today (a C
+     * macro's QN ends in "#macro", but Macro is no registry label, so it never
+     * gets here). A grammar that starts
      * minting a '#' opts into this second key by doing so, whatever it means by
      * the fence: its symbols become reachable under the passed name as well,
      * and they share that name's bucket with everything else filed under it. */
