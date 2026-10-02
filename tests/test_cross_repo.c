@@ -271,12 +271,14 @@ TEST(cross_repo_null_target_fails_without_dereference) {
     const char *targets[] = {NULL};
     cbm_cross_repo_result_t result = cbm_cross_repo_match("null-target-source", targets, 1);
     rejected = result.failed;
+    cbm_cross_repo_result_free(&result);
 #else
     fflush(NULL);
     pid_t child = fork();
     if (child == 0) {
         const char *targets[] = {NULL};
         cbm_cross_repo_result_t result = cbm_cross_repo_match("null-target-source", targets, 1);
+        cbm_cross_repo_result_free(&result);
         _exit(result.failed ? 0 : 2);
     }
     int status = 0;
@@ -308,6 +310,7 @@ TEST(cross_repo_wildcard_keeps_projects_containing_internal_tokens) {
     const char *targets[] = {"*"};
     cbm_cross_repo_result_t result = cbm_cross_repo_match("wildcard-source", targets, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(result.failed);
     ASSERT_EQ(result.projects_scanned, 4);
@@ -367,6 +370,7 @@ TEST(cross_repo_wildcard_skips_pre768_store_issue2133) {
     cbm_cross_repo_result_t result = cbm_cross_repo_match("wild-src", targets, 1);
     int edges = cross_repo_count_edges(&fixture, "wild-src", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(result.failed);
     ASSERT_EQ(result.projects_scanned, 1);
@@ -394,6 +398,8 @@ TEST(cross_repo_named_pre768_target_fails_before_cleanup_issue2133) {
     cbm_cross_repo_result_t result = cbm_cross_repo_match("named-src", with_pre768, 2);
     int after = cross_repo_count_edges(&fixture, "named-src", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&initial);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(initial.failed);
     ASSERT_EQ(before, 1);
@@ -579,6 +585,7 @@ TEST(cross_repo_scan_bound_counts_examined_rows_not_matches) {
     const char *target = "bounded-target";
     cbm_cross_repo_result_t result = cbm_cross_repo_match("bounded-source", &target, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(result.failed);
     ASSERT_EQ(result.projects_scanned, 1);
@@ -608,6 +615,8 @@ TEST(cross_repo_propagates_delete_failure) {
         failed = cbm_cross_repo_match("delete-source", &target, 1);
     }
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&initial);
+    cbm_cross_repo_result_free(&failed);
 
     ASSERT_TRUE(trigger_created);
     ASSERT_TRUE(failed.failed);
@@ -631,6 +640,7 @@ TEST(cross_repo_failed_bidirectional_insert_is_not_counted) {
     const char *target = "insert-target";
     cbm_cross_repo_result_t result = cbm_cross_repo_match("insert-source", &target, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_TRUE(result.failed);
     ASSERT_EQ(result.http_edges, 0);
@@ -683,6 +693,7 @@ TEST(cross_repo_cancel_mid_run_keeps_completed_target_and_stops_before_later_tar
     int later_target_edges =
         cross_repo_count_edges(&fixture, "cancel-target-c", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_EQ(hook.fired, 1);
     ASSERT_TRUE(result.cancelled);
@@ -714,6 +725,8 @@ TEST(cross_repo_pre_cancel_preserves_existing_cross_edges) {
         cbm_cross_repo_match_cancellable("pre-cancel-source", &target, 1, &cancelled);
     int after = cross_repo_count_edges(&fixture, "pre-cancel-source", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&initial);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(initial.failed);
     ASSERT_TRUE(before > 0);
@@ -747,6 +760,8 @@ TEST(cross_repo_self_only_target_fails_and_keeps_edges_issue1133) {
     cbm_cross_repo_result_t result = cbm_cross_repo_match("self-source", &self, 1);
     int after = cross_repo_count_edges(&fixture, "self-source", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&initial);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(initial.failed);
     ASSERT_TRUE(before > 0);
@@ -770,6 +785,7 @@ TEST(cross_repo_wildcard_with_no_other_project_fails_issue1133) {
     const char *targets[] = {"*"};
     cbm_cross_repo_result_t result = cbm_cross_repo_match("lonely-source", targets, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_TRUE(result.failed);
     ASSERT_TRUE(result.no_targets);
@@ -820,6 +836,7 @@ TEST(cross_repo_accepts_project_with_missed_shadow_row_issue1609) {
     const char *target = "shadow-target";
     cbm_cross_repo_result_t result = cbm_cross_repo_match("shadow-source", &target, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
 
     ASSERT_FALSE(result.failed);
     ASSERT_EQ(result.projects_scanned, 1);
@@ -847,6 +864,8 @@ TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459) {
     int mono_edges = cross_repo_count_edges(&fixture, "mono-1459", "CROSS_HTTP_CALLS");
     int api_edges = cross_repo_count_edges(&fixture, "api-1459", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&fwd);
+    cbm_cross_repo_result_free(&rev);
 
     ASSERT_FALSE(fwd.failed);
     ASSERT_FALSE(rev.failed);
@@ -880,6 +899,8 @@ TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459) 
     int mono_edges = cross_repo_count_edges(&fixture, "mono2-1459", "CROSS_HTTP_CALLS");
     int api_edges = cross_repo_count_edges(&fixture, "api3-1459", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&fwd);
+    cbm_cross_repo_result_free(&rev);
 
     ASSERT_FALSE(fwd.failed);
     ASSERT_FALSE(rev.failed);
@@ -908,6 +929,8 @@ TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459) {
     const char *consumer = "client-1459";
     cbm_cross_repo_result_t rev = cbm_cross_repo_match("api2-1459", &consumer, 1);
     cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&fwd);
+    cbm_cross_repo_result_free(&rev);
 
     ASSERT_FALSE(fwd.failed);
     ASSERT_FALSE(rev.failed);
