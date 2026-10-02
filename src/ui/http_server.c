@@ -28,6 +28,7 @@
 #endif
 /* pipeline.h no longer needed — indexing runs as subprocess */
 #include "foundation/log.h"
+#include "foundation/mem_core.h"
 #include "foundation/platform.h"
 #include "foundation/secure_random.h"
 #include "foundation/sha256.h"
@@ -164,6 +165,13 @@ static void handle_ui_config(cbm_http_conn_t *c, const cbm_http_req_t *req) {
  * job field that buffer is copied to: the job carries the resolved string
  * whole, so the path handed to the daemon is the one the route checked. */
 #define INDEX_JOB_ROOT_CAP 4096
+#define INDEX_JOB_ERROR_CAP 256
+/* GET /api/index-status sizes its body from the table: per entry the framing
+ * below ({"slot":N,"status":"indexing","path":"","error":""} and a separator,
+ * well under 64 bytes) plus both strings at cbm_json_escape's widest expansion,
+ * six bytes for a control character (\u00XX). */
+#define INDEX_STATUS_ENTRY_FRAMING 64
+#define JSON_ESCAPE_MAX_EXPANSION 6
 
 enum {
     HTTP_RUN_IDLE = 0,
@@ -177,7 +185,7 @@ typedef struct {
     char root_path[INDEX_JOB_ROOT_CAP]; /* resolved form, see handle_index_start */
     char project_name[256];
     atomic_int status; /* 0=idle, 1=running, 2=done, 3=error */
-    char error_msg[256];
+    char error_msg[INDEX_JOB_ERROR_CAP];
     cbm_thread_t thread;
     bool thread_started;
     atomic_int completed;
@@ -1256,44 +1264,67 @@ static void handle_index_start(cbm_http_server_t *server, cbm_http_conn_t *c,
     }
     job->thread_started = true;
 
+    /* The reply names the stored root; escape it as the status listing does,
+     * or a quote or backslash in the path ends the JSON string early. */
+    char esc_path[JSON_ESCAPE_MAX_EXPANSION * INDEX_JOB_ROOT_CAP];
+    cbm_json_escape(esc_path, (int)sizeof(esc_path), job->root_path);
     cbm_http_replyf(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
-                    slot, job->root_path);
+                    slot, esc_path);
+}
+
+/* Append src JSON-escaped, under http_appendf's clamp contract: once *pos has
+ * reached bufsz nothing more is written. */
+static void http_append_json_escaped(char *buf, size_t bufsz, int *pos, const char *src) {
+    if (*pos < 0) {
+        return;
+    }
+    if ((size_t)*pos >= bufsz) {
+        *pos = (int)bufsz;
+        return;
+    }
+    *pos += cbm_json_escape(buf + *pos, (int)(bufsz - (size_t)*pos), src);
 }
 
 /* GET /api/index-status — returns status of all index jobs */
 static void handle_index_status(cbm_http_server_t *server, cbm_http_conn_t *c) {
-    char buf[2048] = "[";
-    int pos = 1;
+    /* Size the body for a full table: every slot's framing plus its root and
+     * error message at the widest escape. A fixed 2 KB stack buffer used to
+     * clamp here, so one long resolved root (the field holds 4 KB) came back
+     * as a cut JSON body with status 200. The append helpers keep clamping,
+     * so this calculation is not the only thing keeping pos in range. */
+    size_t buf_size = 2 + (size_t)MAX_INDEX_JOBS * (INDEX_STATUS_ENTRY_FRAMING +
+                                                    JSON_ESCAPE_MAX_EXPANSION *
+                                                        (INDEX_JOB_ROOT_CAP + INDEX_JOB_ERROR_CAP));
+    char *buf = cbm_alloc(CBM_MEM_CLASS_OTHER, buf_size);
+    if (!buf) {
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"oom\"}");
+        return;
+    }
+    int pos = 0;
+    http_appendf(buf, buf_size, &pos, "[");
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         int st = atomic_load(&server->index_jobs[i].status);
         if (st == 0)
             continue;
         if (pos > 1)
-            http_appendf(buf, sizeof(buf), &pos, ",");
+            http_appendf(buf, buf_size, &pos, ",");
         const char *ss = st == 1 ? "indexing" : st == 2 ? "done" : "error";
-        /* root_path is the resolved root POST /api/index stored, up to
-         * INDEX_JOB_ROOT_CAP - 1 bytes, so one long path already exceeds this
-         * buffer. http_appendf pins pos to sizeof(buf) on truncation, so the
-         * separator and the close have to go through it as well rather than
-         * indexing raw. Both fields are free-form, so escape them — a quote in a
-         * path would otherwise end its JSON string early. */
-        /* Escaping can double each byte: root_path is INDEX_JOB_ROOT_CAP,
-         * error_msg 256. */
-        char esc_path[2 * INDEX_JOB_ROOT_CAP];
-        char esc_error[512];
-        cbm_json_escape(esc_path, (int)sizeof(esc_path), server->index_jobs[i].root_path);
-        cbm_json_escape(esc_error, (int)sizeof(esc_error),
-                        st == 3 ? server->index_jobs[i].error_msg : "");
-        http_appendf(buf, sizeof(buf), &pos,
-                     "{\"slot\":%d,\"status\":\"%s\",\"path\":\"%s\",\"error\":\"%s\"}", i, ss,
-                     esc_path, esc_error);
+        /* Both fields are free-form, so escape them — a quote in a path would
+         * otherwise end its JSON string early. */
+        http_appendf(buf, buf_size, &pos, "{\"slot\":%d,\"status\":\"%s\",\"path\":\"", i, ss);
+        http_append_json_escaped(buf, buf_size, &pos, server->index_jobs[i].root_path);
+        http_appendf(buf, buf_size, &pos, "\",\"error\":\"");
+        http_append_json_escaped(buf, buf_size, &pos,
+                                 st == 3 ? server->index_jobs[i].error_msg : "");
+        http_appendf(buf, buf_size, &pos, "\"}");
     }
-    http_appendf(buf, sizeof(buf), &pos, "]");
-    if ((size_t)pos >= sizeof(buf)) {
-        pos = (int)sizeof(buf) - 1;
+    http_appendf(buf, buf_size, &pos, "]");
+    if ((size_t)pos >= buf_size) {
+        pos = (int)buf_size - 1;
     }
     buf[pos] = '\0';
-    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
+    cbm_http_reply_buf(c, 200, g_cors_json, buf, (size_t)pos);
+    cbm_free(CBM_MEM_CLASS_OTHER, buf);
 }
 
 static void unwatch_project(cbm_http_server_t *srv, const char *name) {

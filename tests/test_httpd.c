@@ -29,6 +29,7 @@
 #include "ui/http_server.h"
 #include <store/store.h>
 #include <watcher/watcher.h>
+#include <yyjson/yyjson.h> /* the index replies are asserted as parsed JSON */
 
 #include <limits.h> /* PATH_MAX: which platforms resolve a root past 1 KB */
 #include <stdio.h>
@@ -1272,6 +1273,60 @@ TEST(ui_server_index_start_long_root_not_truncated) {
     ASSERT_TRUE(created);
     ASSERT_EQ(probe.status, 202);
 #endif
+    PASS();
+}
+
+/* The 202 reply names the stored root; a quote or backslash in it has to
+ * travel escaped or the reply is not JSON. */
+TEST(ui_server_index_start_reply_escapes_path) {
+    char *tmp = th_mktempdir("cbm_httpd_index_quote");
+    ASSERT_NOT_NULL(tmp);
+    char base[256];
+    snprintf(base, sizeof(base), "%s", tmp);
+    char root[512];
+#ifdef _WIN32
+    /* A quote is not a legal file-name byte on Windows; the separators of the
+     * resolved path already need escaping there. */
+    snprintf(root, sizeof(root), "%s\\plain", base);
+#else
+    snprintf(root, sizeof(root), "%s/q\"uote", base);
+#endif
+    ASSERT_EQ(th_mkdir_p(root), 0);
+    char canonical[4096];
+    ASSERT_TRUE(cbm_canonical_path(root, canonical, sizeof(canonical)));
+    /* The request body is JSON too, so the root goes in escaped. */
+    char request_path[1024];
+    cbm_json_escape(request_path, (int)sizeof(request_path), root);
+
+    th_ui_index_probe_t probe;
+    th_ui_index_probe(&probe, request_path, "quoted");
+    th_cleanup(base);
+
+    bool parsed = false;
+    int slot = -1;
+    char reply_path[4096] = "";
+    const char *body = th_response_body(probe.response);
+    yyjson_doc *doc = yyjson_read(body, strlen(body), 0);
+    if (doc) {
+        yyjson_val *obj = yyjson_doc_get_root(doc);
+        yyjson_val *path = yyjson_obj_get(obj, "path");
+        yyjson_val *slot_val = yyjson_obj_get(obj, "slot");
+        parsed = yyjson_is_obj(obj);
+        if (yyjson_is_str(path)) {
+            snprintf(reply_path, sizeof(reply_path), "%s", yyjson_get_str(path));
+        }
+        if (yyjson_is_int(slot_val)) {
+            slot = yyjson_get_int(slot_val);
+        }
+        yyjson_doc_free(doc);
+    }
+
+    ASSERT_EQ(probe.status, 202);
+    ASSERT_TRUE(probe.executor_called);
+    ASSERT_STR_EQ(probe.executor.root_path, canonical);
+    ASSERT_TRUE(parsed);
+    ASSERT_STR_EQ(reply_path, canonical);
+    ASSERT_TRUE(slot >= 0);
     PASS();
 }
 
@@ -2644,6 +2699,173 @@ TEST(ui_server_index_status_long_paths_no_overflow) {
 #endif
 }
 
+/* Grow path in place to exactly target bytes with 'd' components, none
+ * longer than 200 so every component stays under NAME_MAX. */
+static void th_pad_path_to(char *path, size_t cap, int target) {
+    char fill[201];
+    memset(fill, 'd', sizeof(fill) - 1);
+    fill[sizeof(fill) - 1] = '\0';
+    int n = (int)strlen(path);
+    while (n < target && (size_t)n + 2 < cap) {
+        int room = target - n - 1; /* after the '/' */
+        int len = room > 200 ? 200 : room;
+        if (len <= 0) {
+            break;
+        }
+        n += snprintf(path + n, cap - (size_t)n, "/%.*s", len, fill);
+    }
+}
+
+/* Parse an index-status body and compare each entry's "path" with the root
+ * expected for its slot. Results go to out-params so the caller can tear
+ * down before asserting. */
+static void th_index_status_check(const char *body, int expected_count, char expected[][4096],
+                                  bool *parsed, int *count, bool *paths_whole) {
+    *parsed = false;
+    *count = 0;
+    *paths_whole = false;
+    yyjson_doc *doc = yyjson_read(body, strlen(body), 0);
+    if (!doc) {
+        return;
+    }
+    yyjson_val *arr = yyjson_doc_get_root(doc);
+    if (yyjson_is_arr(arr)) {
+        *parsed = true;
+        *count = (int)yyjson_arr_size(arr);
+        bool whole = *count == expected_count;
+        size_t idx;
+        size_t max_entries;
+        yyjson_val *entry;
+        yyjson_arr_foreach(arr, idx, max_entries, entry) {
+            yyjson_val *slot = yyjson_obj_get(entry, "slot");
+            yyjson_val *path = yyjson_obj_get(entry, "path");
+            int s = yyjson_is_int(slot) ? yyjson_get_int(slot) : -1;
+            whole = whole && s >= 0 && s < expected_count && yyjson_is_str(path) &&
+                    strcmp(yyjson_get_str(path), expected[s]) == 0;
+        }
+        *paths_whole = whole;
+    }
+    yyjson_doc_free(doc);
+}
+
+/* The listing is sized for what the job table holds. Every slot takes a root
+ * as long as the platform resolves; the body has to parse as JSON and carry
+ * each root whole, first with one job and then with the table full. Roots
+ * enter the table the way the clamp test's do: real directories through the
+ * route, held open by the blocking executor so every slot stays occupied. */
+TEST(ui_server_index_status_long_roots_render_whole) {
+    char *tmp = th_mktempdir("cbm_status_whole");
+    ASSERT_NOT_NULL(tmp);
+    char base[256];
+    snprintf(base, sizeof(base), "%s", tmp);
+    /* Linux: just under the 4 KB field; the 4 KB request body still wraps it. */
+    int target = 4096 - 160;
+#if defined(_WIN32)
+    /* MAX_PATH: long roots are not characterised there; the listing is still
+     * checked for shape and content with every slot occupied. */
+    target = 200;
+#elif defined(PATH_MAX) && PATH_MAX < 4096
+    /* macOS: the longest root the route can resolve; four still exceed 2 KB. */
+    target = PATH_MAX - 96;
+#endif
+    char deep[MAX_TEST_INDEX_JOBS][4096];
+    char expected[MAX_TEST_INDEX_JOBS][4096];
+    for (int j = 0; j < MAX_TEST_INDEX_JOBS; j++) {
+        snprintf(deep[j], sizeof(deep[j]), "%s/%d", base, j);
+        th_pad_path_to(deep[j], sizeof(deep[j]), target);
+        ASSERT_EQ((int)strlen(deep[j]), target);
+        ASSERT_EQ(th_mkdir_p(deep[j]), 0);
+        ASSERT_TRUE(cbm_canonical_path(deep[j], expected[j], sizeof(expected[j])));
+    }
+
+    th_ui_blocking_index_executor_t executor = {0};
+    atomic_init(&executor.calls, 0);
+    atomic_init(&executor.release, 0);
+    th_server_t ts;
+    ts.srv = cbm_http_server_new(0);
+    ASSERT_NOT_NULL(ts.srv);
+    cbm_http_server_set_index_executor(ts.srv, th_ui_blocking_index_executor, &executor);
+    ASSERT_EQ(th_server_thread_start(&ts.tid, ts.srv), 0);
+    int port = cbm_http_server_port(ts.srv);
+    char status_request[128];
+    snprintf(status_request, sizeof(status_request),
+             "GET /api/index-status HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n", port);
+
+    int accepted = 0;
+    bool started = true;
+    bool one_parsed = false;
+    bool one_whole = false;
+    bool all_parsed = false;
+    bool all_whole = false;
+    int one_count = 0;
+    int all_count = 0;
+    size_t one_body_len = 0;
+    size_t all_body_len = 0;
+    char listing[65536];
+    for (int j = 0; j < MAX_TEST_INDEX_JOBS; j++) {
+        char body[4600];
+        snprintf(body, sizeof(body), "{\"root_path\":\"%s\",\"project_name\":\"p%d\"}", deep[j], j);
+        char request[4900];
+        snprintf(request, sizeof(request),
+                 "POST /api/index HTTP/1.1\r\nContent-Type: application/json\r\n"
+                 "Content-Length: %zu\r\n\r\n%s",
+                 strlen(body), body);
+        char response[8192];
+        int rn = th_http(port, request, response, sizeof(response));
+        if (rn > 0 && th_status(response) == 202) {
+            accepted++;
+        }
+        /* Wait for the state the listing depends on: this job running. */
+        started = started && th_wait_atomic_int(&executor.calls, j + 1, 5000);
+        if (j == 0 || j == MAX_TEST_INDEX_JOBS - 1) {
+            int n = th_http(port, status_request, listing, sizeof(listing));
+            const char *status_body = n > 0 ? th_response_body(listing) : "";
+            if (j == 0) {
+                one_body_len = strlen(status_body);
+                th_index_status_check(status_body, 1, expected, &one_parsed, &one_count,
+                                      &one_whole);
+            } else {
+                all_body_len = strlen(status_body);
+                th_index_status_check(status_body, MAX_TEST_INDEX_JOBS, expected, &all_parsed,
+                                      &all_count, &all_whole);
+            }
+        }
+    }
+    /* Release the workers and tear down; free refuses until each worker has
+     * flagged completion, the same way the active-worker test waits. */
+    atomic_store(&executor.release, 1);
+    cbm_http_server_stop(ts.srv);
+    ASSERT_EQ(cbm_thread_join(&ts.tid), 0);
+    bool freed = false;
+    uint64_t deadline = cbm_now_ms() + 2000;
+    while (!freed && cbm_now_ms() < deadline) {
+        freed = cbm_http_server_free(ts.srv);
+        if (!freed)
+            cbm_usleep(1000);
+    }
+    th_cleanup(base);
+
+    ASSERT_TRUE(freed);
+    ASSERT_EQ(accepted, MAX_TEST_INDEX_JOBS);
+    ASSERT_TRUE(started);
+    if (!one_parsed) {
+        char m[128];
+        snprintf(m, sizeof(m), "one-job index-status body of %zu bytes is not JSON", one_body_len);
+        FAIL(m);
+    }
+    ASSERT_EQ(one_count, 1);
+    ASSERT_TRUE(one_whole);
+    if (!all_parsed) {
+        char m[128];
+        snprintf(m, sizeof(m), "full-table index-status body of %zu bytes is not JSON",
+                 all_body_len);
+        FAIL(m);
+    }
+    ASSERT_EQ(all_count, MAX_TEST_INDEX_JOBS);
+    ASSERT_TRUE(all_whole);
+    PASS();
+}
+
 /* ── Suite ────────────────────────────────────────────────────── */
 
 SUITE(httpd) {
@@ -2651,6 +2873,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_browse_wide_dir_no_overflow);
     RUN_TEST(ui_server_logs_escape_dense_no_overflow);
     RUN_TEST(ui_server_index_status_long_paths_no_overflow);
+    RUN_TEST(ui_server_index_status_long_roots_render_whole);
     /* Parser / helpers */
     RUN_TEST(httpd_parse_simple_get);
     RUN_TEST(httpd_parse_security_headers_and_rejects_duplicates);
@@ -2688,6 +2911,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_index_start_refuses_root_outside_allowed);
     RUN_TEST(ui_server_index_start_stores_resolved_root);
     RUN_TEST(ui_server_index_start_long_root_not_truncated);
+    RUN_TEST(ui_server_index_start_reply_escapes_path);
     RUN_TEST(ui_server_root_without_embedded_assets_is_not_found);
     RUN_TEST(ui_server_same_origin_request_is_allowed);
     RUN_TEST(ui_server_rejects_foreign_and_null_origins);
