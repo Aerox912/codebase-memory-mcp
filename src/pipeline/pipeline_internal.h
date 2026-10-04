@@ -213,14 +213,24 @@ void cbm_pipeline_set_pkgmap(CBMHashTable *map);
  * Laravel `[Class::class, 'method']` and invokable `Class::class` handlers
  * (#1146), with the class already qualified through the file's `use` imports
  * and namespace — is placed on a method QN only by what places the class file:
- * a composer.json PSR-4 root in psr4_roots (the package map), else the one
- * candidate whose directories end with the class's namespace. Never by short
- * name alone, so a vendor controller that is not in the repo gets no handler.
- * A reference without "::" resolves exactly as cbm_registry_resolve does. */
+ * the composer.json PSR-4 class file in gbuf (cbm_pipeline_psr4_member_qn),
+ * else the one candidate whose directories end with the class's namespace.
+ * Never by short name alone, so a vendor controller that is not in the repo
+ * gets no handler. A reference without "::" resolves exactly as
+ * cbm_registry_resolve does. */
 cbm_resolution_t cbm_registry_resolve_handler(const cbm_registry_t *r, const char *handler_ref,
                                               const char *module_qn, const char **import_map_keys,
                                               const char **import_map_vals, int import_map_count,
-                                              const CBMHashTable *psr4_roots);
+                                              const cbm_gbuf_t *gbuf);
+
+/* The QN of `member` on the PHP class `class_fqn` ("Ns\\Class", NUL-
+ * terminated), placed the way composer's PSR-4 autoloader places the class:
+ * the class file the import resolver picks for `use Ns\\Class;` (#1186), the
+ * class that file defines, then that class's member. NULL when no PSR-4
+ * prefix covers the class, its file is absent, or the class has no such
+ * member. The returned string is owned by gbuf. Read-only on gbuf. */
+const char *cbm_pipeline_psr4_member_qn(const cbm_gbuf_t *gbuf, const char *class_fqn,
+                                        const char *member);
 
 /* Unified module resolver: relative → pkgmap → fqn_module fallback.
  * Handles bare specifiers via pkgmap lookup with prefix matching.

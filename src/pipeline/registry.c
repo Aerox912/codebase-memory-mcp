@@ -1502,42 +1502,21 @@ static int qn_class_member_tail(const char *qn, const char *cls, size_t cls_len,
     return (int)(c - SKIP_ONE - qn);
 }
 
-/* PSR-4: the longest composer.json autoload root "Prefix\\" that prefixes the
- * FQN maps the remaining namespace onto directories below the root's folder
- * and the class onto <Class>.php — the file Composer's autoloader loads.
- * Returns the registered method QN, or NULL (no root prefixes the FQN, or the
- * autoloaded file holds no such method). */
-static const char *psr4_member_qn(const cbm_registry_t *r, const CBMHashTable *psr4_roots,
-                                  const char *fqn, size_t fqn_len, const char *cls, size_t cls_len,
+/* PSR-4: the class file Composer's autoloader loads for the FQN, the class it
+ * defines, and that class's member — through the PSR-4 import resolver
+ * (cbm_pipeline_psr4_member_qn), so a root whose folder does not mirror its
+ * namespace (Acme\\Blog\\ -> packages/blog/src) places the class as well.
+ * Returns the member QN, or NULL (no root covers the FQN, its class file is
+ * absent, or the class holds no such member). */
+static const char *psr4_member_qn(const cbm_gbuf_t *gbuf, const char *fqn, size_t fqn_len,
                                   const char *member) {
-    if (!psr4_roots || fqn_len >= CBM_SZ_512) {
+    char cls_fqn[CBM_SZ_512];
+    if (!gbuf || fqn_len >= sizeof(cls_fqn)) {
         return NULL;
     }
-    char key[CBM_SZ_512];
-    for (size_t cut = fqn_len; cut > 0; cut--) {
-        if (fqn[cut - SKIP_ONE] != '\\') {
-            continue;
-        }
-        memcpy(key, fqn, cut); /* "App\\" / "App\\Http\\" — keeps the trailing '\\' */
-        key[cut] = '\0';
-        const char *root_qn = (const char *)cbm_ht_get(psr4_roots, key);
-        if (!root_qn) {
-            continue;
-        }
-        char qn[CBM_SZ_1K];
-        int n = snprintf(qn, sizeof(qn), "%s.%.*s.%.*s.%s", root_qn, (int)(fqn_len - cut),
-                         fqn + cut, (int)cls_len, cls, member);
-        if (n <= 0 || (size_t)n >= sizeof(qn)) {
-            return NULL;
-        }
-        for (char *p = qn + strlen(root_qn); *p; p++) {
-            if (*p == '\\') {
-                *p = '.';
-            }
-        }
-        return cbm_ht_get_key(r->exact, qn);
-    }
-    return NULL;
+    memcpy(cls_fqn, fqn, fqn_len);
+    cls_fqn[fqn_len] = '\0';
+    return cbm_pipeline_psr4_member_qn(gbuf, cls_fqn, member);
 }
 
 /* Do the directory segments of qn (between the project root segment and the
@@ -1600,7 +1579,7 @@ static const char *aligned_member_qn(const cbm_registry_t *r, const char *fqn, s
 cbm_resolution_t cbm_registry_resolve_handler(const cbm_registry_t *r, const char *handler_ref,
                                               const char *module_qn, const char **import_map_keys,
                                               const char **import_map_vals, int import_map_count,
-                                              const CBMHashTable *psr4_roots) {
+                                              const cbm_gbuf_t *gbuf) {
     const char *sep = handler_ref ? strstr(handler_ref, "::") : NULL;
     if (!r || !sep) {
         return cbm_registry_resolve(r, handler_ref, module_qn, import_map_keys, import_map_vals,
@@ -1618,7 +1597,7 @@ cbm_resolution_t cbm_registry_resolve_handler(const cbm_registry_t *r, const cha
     if (cls_len == 0 || !member[0]) {
         return empty_result();
     }
-    const char *qn = psr4_member_qn(r, psr4_roots, handler_ref, fqn_len, cls, cls_len, member);
+    const char *qn = psr4_member_qn(gbuf, handler_ref, fqn_len, member);
     if (qn) {
         return (cbm_resolution_t){qn, "php_psr4", CONF_PSR4_MEMBER, REG_RESOLVED};
     }
