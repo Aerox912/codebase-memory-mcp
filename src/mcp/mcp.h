@@ -186,7 +186,7 @@ void cbm_mcp_server_set_watcher(cbm_mcp_server_t *srv, struct cbm_watcher *w);
 typedef struct {
     bool watched;
     const char *reason;       /* why not watched (set when !watched) */
-    const char *strategy;     /* "pending" | "git" | "none" (set when watched) */
+    const char *strategy;     /* "pending" | "git" | "tree" | "none" (set when watched) */
     int poll_interval_ms;     /* current adaptive cadence (when watched) */
     int64_t last_scan_unix_s; /* last completed scan, wall clock; 0 = none yet */
 } cbm_mcp_watch_status_t;

@@ -93,6 +93,12 @@ Current keys:
 | `index_max_files` | `off` | Optional maximum number of accepted source files in one discovery run. |
 | `index_max_source_mb` | `off` | Optional maximum accepted source size in MiB in one discovery run. |
 
+For a watched project, `index_status` names the polling method in `watch.strategy`:
+`git` (HEAD and dirty-state polling), `tree` (a non-git root polled by the
+`watch_non_git` file-tree scan), `none` (a non-git root that is registered but never
+polled, the default for a plain directory) or `pending` (registered; the first poll
+has not run yet).
+
 > **`watcher_enabled` vs `auto_watch`.** `watcher_enabled` controls whether the
 > watcher *subsystem* starts at all (the background poll thread). `auto_watch` is
 > narrower: it only controls whether a connecting session registers *its own*

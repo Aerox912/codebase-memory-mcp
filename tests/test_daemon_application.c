@@ -1301,6 +1301,90 @@ TEST(daemon_application_index_status_watcher_disabled_issue2167) {
     PASS();
 }
 
+/* #2167 with #1948: a non-git root that watch_non_git polls by file-tree scan
+ * reports strategy "tree". "none" stays reserved for a registered root that is
+ * never polled (a plain directory without the opt-in). */
+TEST(daemon_application_index_status_reports_tree_strategy_issue2167) {
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    bool had_cache = old_cache != NULL;
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    char root[APP_TEST_PATH_CAP];
+    char cache[APP_TEST_PATH_CAP];
+    snprintf(root, sizeof(root), "%s/cbm-app-tree-root-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-app-tree-cache-XXXXXX", cbm_tmpdir());
+    bool dirs_ok = cbm_mkdtemp(root) != NULL && cbm_mkdtemp(cache) != NULL;
+    bool env_ok = (!had_cache || saved_cache) && cbm_setenv("CBM_CACHE_DIR", cache, 1) == 0;
+    char *project = dirs_ok ? cbm_project_name_from_path(root) : NULL;
+    char db_path[APP_TEST_PATH_CAP] = {0};
+    bool seeded =
+        project && app_test_seed_project_db(cache, project, root, db_path, sizeof(db_path));
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *watcher = cbm_watcher_new(store, app_test_index_noop, NULL);
+    /* What the daemon host does at startup when watch_non_git is true. */
+    cbm_watcher_set_poll_non_git(watcher, true);
+    cbm_daemon_application_config_t config = {.watcher = watcher, .config = NULL};
+    cbm_daemon_application_t *application = cbm_daemon_application_new(&config);
+    cbm_daemon_runtime_application_callbacks_t callbacks =
+        cbm_daemon_application_runtime_callbacks(application);
+    cbm_daemon_runtime_application_session_t *session = app_test_open(&callbacks, 23);
+    uint8_t *context = NULL;
+    uint32_t context_length = 0;
+    uint8_t *ping = NULL;
+    uint32_t ping_length = 0;
+    uint8_t *response = NULL;
+    uint32_t response_length = 0;
+    /* Context + one MCP request registers the session root's watch. */
+    bool registered = seeded && app_test_context_request(root, root, &context, &context_length) &&
+                      app_test_text_request(CBM_DAEMON_APPLICATION_REQUEST_MCP,
+                                            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}",
+                                            &ping, &ping_length) &&
+                      app_test_request(&callbacks, session, context, context_length, &response,
+                                       &response_length) == CBM_DAEMON_RUNTIME_APPLICATION_OK;
+    free(response);
+    response = NULL;
+    registered =
+        registered && app_test_request(&callbacks, session, ping, ping_length, &response,
+                                       &response_length) == CBM_DAEMON_RUNTIME_APPLICATION_OK;
+    free(response);
+    response = NULL;
+    registered = registered && cbm_watcher_watch_count(watcher) == 1;
+    /* The first poll completes the baseline: the plain directory gets tree
+     * polling and its strategy is published. */
+    if (registered) {
+        (void)cbm_watcher_poll_once(watcher);
+    }
+
+    char *status = registered ? app_test_index_status(&callbacks, session, project) : NULL;
+    bool tree = app_test_response_has(status, "watched", "true") &&
+                app_test_response_has(status, "strategy", "\\\"tree\\\"");
+
+    callbacks.session_cancel(callbacks.context, session);
+    callbacks.session_close(callbacks.context, session);
+    cbm_daemon_application_free(application);
+    cbm_watcher_stop(watcher);
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    free(status);
+    free(context);
+    free(ping);
+    free(project);
+    app_test_unlink_project_db(db_path);
+    (void)cbm_rmdir(root);
+    (void)cbm_rmdir(cache);
+    if (saved_cache) {
+        (void)cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+    } else if (!had_cache) {
+        (void)cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_cache);
+
+    ASSERT_TRUE(env_ok);
+    ASSERT_TRUE(seeded);
+    ASSERT_TRUE(registered);
+    ASSERT_TRUE(tree);
+    PASS();
+}
+
 TEST(daemon_application_free_releases_live_watch_once) {
     const char *old_cache = getenv("CBM_CACHE_DIR");
     bool had_cache = old_cache != NULL;
@@ -6705,6 +6789,7 @@ SUITE(daemon_application) {
     RUN_TEST(daemon_application_reference_counts_one_shared_watch);
     RUN_TEST(daemon_application_index_status_reports_watch_issue2167);
     RUN_TEST(daemon_application_index_status_watcher_disabled_issue2167);
+    RUN_TEST(daemon_application_index_status_reports_tree_strategy_issue2167);
     RUN_TEST(daemon_application_free_releases_live_watch_once);
     RUN_TEST(daemon_application_prune_clears_logical_watch_for_reregistration);
     RUN_TEST(daemon_application_initialize_coalesces_auto_index_for_full_sessions);

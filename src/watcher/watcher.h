@@ -135,6 +135,7 @@ typedef enum {
     CBM_WATCHER_STRATEGY_PENDING = 0, /* registered; first poll not done yet */
     CBM_WATCHER_STRATEGY_GIT = 1,     /* git HEAD + dirty-state polling */
     CBM_WATCHER_STRATEGY_NONE = 2,    /* not a git project: never polled */
+    CBM_WATCHER_STRATEGY_TREE = 3,    /* not a git project: file-tree polling (watch_non_git) */
 } cbm_watcher_strategy_t;
 
 typedef struct {

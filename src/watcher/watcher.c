@@ -1303,10 +1303,16 @@ int cbm_watcher_watch_count(cbm_watcher_t *w) {
 /* ── Single poll cycle ──────────────────────────────────────────── */
 
 /* Publish what index_status reports: the strategy, the current cadence and,
- * when a check just completed, the wall-clock time of that scan. */
+ * when a check just completed, the wall-clock time of that scan. A non-git
+ * root is "tree" when watch_non_git polls it (#1948), else "none". */
 static void publish_status(project_state_t *s, bool scanned) {
-    atomic_store(&s->status_strategy,
-                 s->is_git ? CBM_WATCHER_STRATEGY_GIT : CBM_WATCHER_STRATEGY_NONE);
+    cbm_watcher_strategy_t strategy = CBM_WATCHER_STRATEGY_NONE;
+    if (s->is_git) {
+        strategy = CBM_WATCHER_STRATEGY_GIT;
+    } else if (s->tree_poll) {
+        strategy = CBM_WATCHER_STRATEGY_TREE;
+    }
+    atomic_store(&s->status_strategy, strategy);
     atomic_store(&s->status_interval_ms, s->interval_ms);
     if (scanned) {
         atomic_store(&s->status_last_scan_s, (int64_t)time(NULL));

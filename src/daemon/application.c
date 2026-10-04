@@ -569,6 +569,8 @@ static const char *application_watch_strategy_name(cbm_watcher_strategy_t strate
     switch (strategy) {
     case CBM_WATCHER_STRATEGY_GIT:
         return "git";
+    case CBM_WATCHER_STRATEGY_TREE:
+        return "tree";
     case CBM_WATCHER_STRATEGY_NONE:
         return "none";
     default:
