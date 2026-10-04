@@ -2138,18 +2138,10 @@ static bool psr4_class_label(const char *label) {
                      strcmp(label, "Trait") == 0 || strcmp(label, "Enum") == 0);
 }
 
-const char *cbm_pipeline_psr4_member_qn(const cbm_gbuf_t *gbuf, const char *class_fqn,
-                                        const char *member) {
-    if (!gbuf || !class_fqn || !member || !member[0]) {
-        return NULL;
-    }
-    const CBMImport imp = {.module_path = class_fqn, .kind = CBM_IMPORT_KIND_DEFAULT};
-    const cbm_gbuf_node_t *file = NULL;
-    if (resolve_php_psr4_class(gbuf, NULL, &imp, &file) != PSR4_RESOLVED || !file->file_path) {
-        return NULL;
-    }
-    const char *cls = strrchr(class_fqn, '\\');
-    cls = cls ? cls + SKIP_ONE : class_fqn;
+/* The QN of `member` on the class `cls` defined in `file_path`, or NULL when
+ * that file defines no such class or the class has no such member. */
+static const char *psr4_member_in_file(const cbm_gbuf_t *gbuf, const char *file_path,
+                                       const char *cls, const char *member) {
     const cbm_gbuf_node_t **hits = NULL;
     int hit_count = 0;
     if (cbm_gbuf_find_by_name(gbuf, cls, &hits, &hit_count) != 0 || !hits) {
@@ -2158,7 +2150,7 @@ const char *cbm_pipeline_psr4_member_qn(const cbm_gbuf_t *gbuf, const char *clas
     for (int i = 0; i < hit_count; i++) {
         const cbm_gbuf_node_t *c = hits[i];
         if (!c || !psr4_class_label(c->label) || !c->qualified_name || !c->file_path ||
-            strcmp(c->file_path, file->file_path) != 0) {
+            strcmp(c->file_path, file_path) != 0) {
             continue;
         }
         char qn[CBM_SZ_1K];
@@ -2170,6 +2162,29 @@ const char *cbm_pipeline_psr4_member_qn(const cbm_gbuf_t *gbuf, const char *clas
         return m ? m->qualified_name : NULL;
     }
     return NULL;
+}
+
+cbm_psr4_member_t cbm_pipeline_psr4_member_qn(const cbm_gbuf_t *gbuf, const char *class_fqn,
+                                              const char *member, const char **out_qn) {
+    *out_qn = NULL;
+    if (!gbuf || !class_fqn || !member || !member[0]) {
+        return CBM_PSR4_MEMBER_NOT_COVERED;
+    }
+    const CBMImport imp = {.module_path = class_fqn, .kind = CBM_IMPORT_KIND_DEFAULT};
+    const cbm_gbuf_node_t *file = NULL;
+    psr4_outcome_t placed = resolve_php_psr4_class(gbuf, NULL, &imp, &file);
+    if (placed == PSR4_NOT_APPLICABLE) {
+        return CBM_PSR4_MEMBER_NOT_COVERED;
+    }
+    /* Covered from here on: composer would load this file or none, so a
+     * missing file, class or member leaves the member unresolved. */
+    if (placed != PSR4_RESOLVED || !file->file_path) {
+        return CBM_PSR4_MEMBER_UNRESOLVED;
+    }
+    const char *cls = strrchr(class_fqn, '\\');
+    cls = cls ? cls + SKIP_ONE : class_fqn;
+    *out_qn = psr4_member_in_file(gbuf, file->file_path, cls, member);
+    return *out_qn ? CBM_PSR4_MEMBER_RESOLVED : CBM_PSR4_MEMBER_UNRESOLVED;
 }
 
 const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t *ctx,

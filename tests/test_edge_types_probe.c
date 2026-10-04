@@ -939,7 +939,11 @@ static int et_qn_has_tail(const char *qn, const char *tail) {
     return ql >= tl && strcmp(qn + ql - tl, tail) == 0 && (ql == tl || qn[ql - tl - 1] == '.');
 }
 
-static int et_handles_exact(const EtFile *files, int nfiles, const EtHandles *want, int parallel) {
+/* route_qns (optional, NULL-terminated): Route qualified_names that must
+ * exist, so a test asserting that a route gets NO handler cannot pass merely
+ * because the route itself was never extracted. */
+static int et_handles_exact_routes(const EtFile *files, int nfiles, const EtHandles *want,
+                                   int parallel, const char *const *route_qns) {
     EtProj lp;
     cbm_store_t *store =
         parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
@@ -983,6 +987,16 @@ static int et_handles_exact(const EtFile *files, int nfiles, const EtHandles *wa
                     want[wi].route);
         }
     }
+    for (int ri = 0; route_qns && route_qns[ri]; ri++) {
+        cbm_node_t route = {0};
+        if (!store ||
+            cbm_store_find_node_by_qn(store, lp.project, route_qns[ri], &route) != CBM_STORE_OK) {
+            ok = 0;
+            fprintf(stderr, "  [ET-HANDLES] missing Route %s\n", route_qns[ri]);
+        } else {
+            cbm_node_free_fields(&route);
+        }
+    }
     if (!ok) {
         fprintf(stderr, "  [ET-HANDLES] FAIL (%s path) expected=%d actual=%d\n",
                 parallel ? "parallel" : "sequential", wanted, n);
@@ -990,6 +1004,10 @@ static int et_handles_exact(const EtFile *files, int nfiles, const EtHandles *wa
     if (edges) cbm_store_free_edges(edges, n);
     et_cleanup(&lp, store);
     return ok;
+}
+
+static int et_handles_exact(const EtFile *files, int nfiles, const EtHandles *want, int parallel) {
+    return et_handles_exact_routes(files, nfiles, want, parallel, NULL);
 }
 
 /* #1146: Laravel's two class-based handler forms —
@@ -1082,6 +1100,56 @@ TEST(handles_laravel_class_handlers_no_composer_issue1146) {
         {NULL, NULL}};
     ASSERT_TRUE(
         et_handles_exact(et_laravel_class_handlers + 1, ET_LARAVEL_CLASS_FILES - 1, want, 0));
+    PASS();
+}
+
+/* A PSR-4 prefix that covers a handler class decides where the class lives,
+ * as it does for the class's `use` import (#1186): when composer would load
+ * no file holding the member, the route stays without a handler. Both routes
+ * below are covered by Acme\Blog\ -> packages/blog/src/:
+ *   /blog/missing  MissingController has no class file there at all;
+ *   /blog/archive  PostsController's class file exists but has no archive().
+ * legacy/Acme/Blog/Http mirrors the namespace and holds both members, so the
+ * namespace/folder fallback would bind both routes to a class composer never
+ * loads. It must not run for a covered class. These files are added to the
+ * fixture above, whose four handlers must keep their edges. */
+static const EtFile et_laravel_psr4_absent_extra[] = {
+    {"legacy/Acme/Blog/Http/MissingController.php",
+     "<?php\nnamespace Acme\\Blog\\Http;\n\n"
+     "class MissingController {\n"
+     "    public function index() { return ['stale' => true]; }\n}\n"},
+    {"legacy/Acme/Blog/Http/PostsController.php",
+     "<?php\nnamespace Acme\\Blog\\Http;\n\n"
+     "class PostsController {\n"
+     "    public function archive() { return ['stale' => true]; }\n}\n"},
+    {"routes/blog.php",
+     "<?php\n"
+     "use Illuminate\\Support\\Facades\\Route;\n\n"
+     "Route::get('/blog/missing', [\\Acme\\Blog\\Http\\MissingController::class, 'index']);\n"
+     "Route::get('/blog/archive', [\\Acme\\Blog\\Http\\PostsController::class, 'archive']);\n"}};
+
+enum { ET_LARAVEL_PSR4_ABSENT_EXTRA = 3 };
+
+static const char *const et_laravel_psr4_absent_routes[] = {
+    "__route__GET__/blog/missing", "__route__GET__/blog/archive", NULL};
+
+static int et_laravel_psr4_absent(int parallel) {
+    EtFile f[ET_LARAVEL_CLASS_FILES + ET_LARAVEL_PSR4_ABSENT_EXTRA];
+    memcpy(f, et_laravel_class_handlers, sizeof(et_laravel_class_handlers));
+    memcpy(f + ET_LARAVEL_CLASS_FILES, et_laravel_psr4_absent_extra,
+           sizeof(et_laravel_psr4_absent_extra));
+    return et_handles_exact_routes(f, ET_LARAVEL_CLASS_FILES + ET_LARAVEL_PSR4_ABSENT_EXTRA,
+                                   et_laravel_class_handles, parallel,
+                                   et_laravel_psr4_absent_routes);
+}
+
+TEST(handles_laravel_psr4_absent_class_issue1146) {
+    ASSERT_TRUE(et_laravel_psr4_absent(0));
+    PASS();
+}
+
+TEST(handles_laravel_psr4_absent_class_parallel_issue1146) {
+    ASSERT_TRUE(et_laravel_psr4_absent(1));
     PASS();
 }
 
@@ -2304,6 +2372,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_laravel_class_handlers_issue1146);
     RUN_TEST(handles_laravel_class_handlers_parallel_issue1146);
     RUN_TEST(handles_laravel_class_handlers_no_composer_issue1146);
+    RUN_TEST(handles_laravel_psr4_absent_class_issue1146);
+    RUN_TEST(handles_laravel_psr4_absent_class_parallel_issue1146);
     RUN_TEST(handles_rails_ruby);
     RUN_TEST(handles_actix_rust);
 

@@ -1506,17 +1506,17 @@ static int qn_class_member_tail(const char *qn, const char *cls, size_t cls_len,
  * defines, and that class's member — through the PSR-4 import resolver
  * (cbm_pipeline_psr4_member_qn), so a root whose folder does not mirror its
  * namespace (Acme\\Blog\\ -> packages/blog/src) places the class as well.
- * Returns the member QN, or NULL (no root covers the FQN, its class file is
- * absent, or the class holds no such member). */
-static const char *psr4_member_qn(const cbm_gbuf_t *gbuf, const char *fqn, size_t fqn_len,
-                                  const char *member) {
+ * Returns its tri-state outcome; *out_qn is the member QN when RESOLVED. */
+static cbm_psr4_member_t psr4_member_qn(const cbm_gbuf_t *gbuf, const char *fqn, size_t fqn_len,
+                                        const char *member, const char **out_qn) {
     char cls_fqn[CBM_SZ_512];
+    *out_qn = NULL;
     if (!gbuf || fqn_len >= sizeof(cls_fqn)) {
-        return NULL;
+        return CBM_PSR4_MEMBER_NOT_COVERED;
     }
     memcpy(cls_fqn, fqn, fqn_len);
     cls_fqn[fqn_len] = '\0';
-    return cbm_pipeline_psr4_member_qn(gbuf, cls_fqn, member);
+    return cbm_pipeline_psr4_member_qn(gbuf, cls_fqn, member, out_qn);
 }
 
 /* Do the directory segments of qn (between the project root segment and the
@@ -1597,9 +1597,16 @@ cbm_resolution_t cbm_registry_resolve_handler(const cbm_registry_t *r, const cha
     if (cls_len == 0 || !member[0]) {
         return empty_result();
     }
-    const char *qn = psr4_member_qn(gbuf, handler_ref, fqn_len, member);
-    if (qn) {
+    const char *qn = NULL;
+    switch (psr4_member_qn(gbuf, handler_ref, fqn_len, member, &qn)) {
+    case CBM_PSR4_MEMBER_RESOLVED:
         return (cbm_resolution_t){qn, "php_psr4", CONF_PSR4_MEMBER, REG_RESOLVED};
+    case CBM_PSR4_MEMBER_UNRESOLVED:
+        /* A covered class lives where PSR-4 says or nowhere; a namespace-
+         * mirroring folder elsewhere would be a guessed edge (#1186). */
+        return empty_result();
+    case CBM_PSR4_MEMBER_NOT_COVERED:
+        break;
     }
     qn = aligned_member_qn(r, handler_ref, ns_len, cls, cls_len, member);
     if (qn) {
