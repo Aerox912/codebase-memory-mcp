@@ -1188,10 +1188,13 @@ TEST(ui_server_index_start_stores_resolved_root) {
     char inner[512];
     snprintf(inner, sizeof(inner), "%s/allowed/inner", base);
     ASSERT_EQ(th_mkdir_p(inner), 0);
-    char canonical_base[4096];
-    ASSERT_TRUE(cbm_canonical_path(base, canonical_base, sizeof(canonical_base)));
-    char allowed_root[4096 + 16];
-    snprintf(allowed_root, sizeof(allowed_root), "%s/allowed", canonical_base);
+    /* The resolved form of the allowed directory itself, as the server
+     * computes it. A "/allowed" suffix on a resolved parent is not that form
+     * on Windows, where the resolved path uses backslashes throughout. */
+    char allowed_dir[512];
+    snprintf(allowed_dir, sizeof(allowed_dir), "%s/allowed", base);
+    char allowed_root[4096];
+    ASSERT_TRUE(cbm_canonical_path(allowed_dir, allowed_root, sizeof(allowed_root)));
     /* The request names the allowed root through a ".." segment, so its
      * spelling is not the resolved form (on macOS /tmp is itself a link to
      * /private/tmp, so the prefix differs as well). */
@@ -1212,12 +1215,13 @@ TEST(ui_server_index_start_stores_resolved_root) {
      * spelling. */
     ASSERT_STR_EQ(probe.executor.root_path, allowed_root);
     ASSERT_STR_EQ(probe.executor.project_name, "resolved");
-    /* The 202 reply and the status listing report that same stored root. */
-    char expected[8192 + 64];
-    snprintf(expected, sizeof(expected), "\"path\":\"%s\"}", allowed_root);
-    ASSERT_NOT_NULL(strstr(probe.response, expected));
+    /* The 202 reply and the status listing report that same stored root,
+     * JSON-escaped (a Windows path carries backslashes). */
     char escaped[8192];
     cbm_json_escape(escaped, (int)sizeof(escaped), allowed_root);
+    char expected[8192 + 64];
+    snprintf(expected, sizeof(expected), "\"path\":\"%s\"}", escaped);
+    ASSERT_NOT_NULL(strstr(probe.response, expected));
     snprintf(expected, sizeof(expected), "\"path\":\"%s\",\"error\"", escaped);
     ASSERT_NOT_NULL(strstr(probe.index_status, expected));
     PASS();
