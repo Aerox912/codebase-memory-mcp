@@ -256,6 +256,10 @@ typedef struct {
      * every other definition, and in every language outside
      * cbm_is_c_preprocessor_lang. */
     const char *variants;
+    /* Callable identity (#2061): offset of the signature suffix inside
+     * qualified_name (base QN = the first qn_sig_off bytes); 0 = no suffix.
+     * Always 0 until a language enables its callable_identity mode. */
+    uint32_t qn_sig_off;
 } CBMDefinition;
 
 /* Argument captured from a call expression */
@@ -325,10 +329,20 @@ typedef struct {
                                      // guard's unique-name exemption. Default false.
 } CBMCall;
 
+// What an import statement names, when the syntax says so. Only PHP's
+// `use function` / `use const` set a non-default kind today: they name a
+// namespace MEMBER, so they must never be mapped to a class file (#1186).
+typedef enum {
+    CBM_IMPORT_KIND_DEFAULT = 0, // module / class / namespace (language default)
+    CBM_IMPORT_KIND_FUNCTION,    // PHP `use function A\b`
+    CBM_IMPORT_KIND_CONST,       // PHP `use const A\B`
+} CBMImportKind;
+
 typedef struct {
     const char *local_name;  // local alias or name
     const char *module_path; // resolved module path / QN
     bool is_default;         // ES default import (`import X from "Y"`), JS/TS only (#1916)
+    CBMImportKind kind;      // CBM_IMPORT_KIND_DEFAULT unless the syntax names a member kind
 } CBMImport;
 
 typedef enum {
@@ -426,6 +440,17 @@ typedef struct {
     CBMChannelDirection direction;
 } CBMChannel;
 
+/* Python: one annotated instance field of a class -- `x: T` or `x: T = v` in
+ * the class body, `self.x: T = v` in __init__, or `self.x = p` where `p` is an
+ * annotated __init__ parameter. Not a graph node: it only carries the field's
+ * declared type to the cross-file LSP, so `obj.x.m()` on a class imported
+ * from another file can be typed (#1277). */
+typedef struct {
+    const char *class_qn;   // QN of the owning class
+    const char *field_name; // attribute name
+    const char *type_text;  // raw annotation text, resolved later per file
+} CBMFieldType;
+
 // Rust: impl Trait for Struct
 typedef struct {
     const char *trait_name;  // trait name (raw text)
@@ -452,6 +477,10 @@ typedef struct {
     uint32_t site_start_byte;      // exact source occurrence; end > start when present
     uint32_t site_end_byte;        // exclusive byte offset in the source file
     CBMSourceOrigin source_origin; // raw source or C-family preprocessed buffer
+    /* Callable identity (#2061): the resolved overload's signature suffix,
+     * appended to callee_qn when the edge is written; NULL = none (always,
+     * until a language enables its callable_identity mode). */
+    const char *callee_sig;
 } CBMResolvedCall;
 
 typedef struct {
@@ -539,6 +568,12 @@ typedef struct {
     int cap;
 } CBMChannelArray;
 
+typedef struct {
+    CBMFieldType *items;
+    int count;
+    int cap;
+} CBMFieldTypeArray;
+
 // Full extraction result for one file.
 typedef struct CBMFileResult {
     CBMArena arena; // owns local memory; composites may also retain child arenas below
@@ -557,6 +592,7 @@ typedef struct CBMFileResult {
     CBMStringRefArray string_refs;       // URL/config string literals from AST
     CBMInfraBindingArray infra_bindings; // topic→URL pairs from IaC configs
     CBMChannelArray channels;            // Socket.IO / EventEmitter pub/sub participation
+    CBMFieldTypeArray field_types;       // Python: annotated instance fields (#1277)
 
     const char *module_qn;      // module qualified name
     const char *namespace_name; // declared namespace/package (Java/Kotlin/C#/PHP), NULL if none
@@ -923,6 +959,7 @@ void cbm_rw_push(CBMRWArray *arr, CBMArena *a, CBMReadWrite rw);
 void cbm_typerefs_push(CBMTypeRefArray *arr, CBMArena *a, CBMTypeRef tr);
 void cbm_envaccess_push(CBMEnvAccessArray *arr, CBMArena *a, CBMEnvAccess ea);
 void cbm_typeassign_push(CBMTypeAssignArray *arr, CBMArena *a, CBMTypeAssign ta);
+void cbm_fieldtype_push(CBMFieldTypeArray *arr, CBMArena *a, CBMFieldType ft);
 void cbm_stringref_push(CBMStringRefArray *arr, CBMArena *a, CBMStringRef sr);
 void cbm_infrabinding_push(CBMInfraBindingArray *arr, CBMArena *a, CBMInfraBinding ib);
 void cbm_impltrait_push(CBMImplTraitArray *arr, CBMArena *a, CBMImplTrait it);
