@@ -10498,10 +10498,12 @@ void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
     }
 
     // Walk AST for function/class definitions
-    int first = ctx->result->defs.count;
-    walk_defs(ctx, ctx->root, spec, 0);
     if (is_c_declarator_lang(ctx->language)) {
+        int first = ctx->result->defs.count;
+        walk_defs(ctx, ctx->root, spec, 0);
         drop_c_typedefs_shadowed_by_tags(ctx, first);
+    } else {
+        walk_defs(ctx, ctx->root, spec, 0);
     }
 
     // Extract module-level variables
