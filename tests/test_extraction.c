@@ -1070,6 +1070,103 @@ TEST(c_struct) {
     PASS();
 }
 
+/* `typedef struct { … } Name;` is the dominant C spelling of a type: the
+ * aggregate itself is anonymous and the typedef's declarator names it. Without
+ * that name the struct had no Class node and none of its members a Field node
+ * (37 of the 38 structs in internal/cbm/cbm.h), so a member access could only
+ * bind some OTHER struct's same-named field. */
+TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef) {
+    CBMFileResult *r = extract("typedef struct {\n"
+                               "    int count;\n"
+                               "    const char *label;\n"
+                               "} Tally;\n"
+                               "\n"
+                               "typedef union {\n"
+                               "    int as_int;\n"
+                               "    float as_float;\n"
+                               "} Slot;\n"
+                               "\n"
+                               "typedef enum { SHADE_RED, SHADE_GREEN } Shade;\n"
+                               "\n"
+                               "typedef struct Named {\n"
+                               "    int id;\n"
+                               "} Named;\n"
+                               "\n"
+                               "typedef struct {\n"
+                               "    int raw;\n"
+                               "} *TallyRef;\n",
+                               CBM_LANG_C, "t", "tally.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the fix: none of the three anonymous aggregates has a def. */
+    ASSERT_TRUE(has_def(r, "Class", "Tally"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.count"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Tally.label"));
+    ASSERT_TRUE(has_def(r, "Class", "Slot"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_int"));
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Slot.as_float"));
+    ASSERT_TRUE(has_def_any(r, "Shade"));
+    /* A struct that names itself keeps exactly one def, under its own name. */
+    ASSERT_EQ(count_defs_named(r, "Class", "Named"), 1);
+    ASSERT_TRUE(has_def_qn(r, "t.tally.Named.id"));
+    /* A pointer typedef names a pointer type, not the aggregate: no Class. */
+    ASSERT_FALSE(has_def(r, "Class", "TallyRef"));
+    ASSERT_FALSE(has_def(r, "Field", "raw"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A pointer-to-function member (`void (*open)(int);`, the shape of every
+ * kernel ops table) is a field of its struct. It shares the
+ * field_declaration + function_declarator shape with a C++ member FUNCTION
+ * declaration, which the field extractor rightly skips; the two differ in
+ * where the name sits: `(*open)` is a parenthesized pointer declarator. */
+TEST(extract_c_function_pointer_member_is_a_field) {
+    CBMFileResult *r = extract("struct Ops {\n"
+                               "    int flags;\n"
+                               "    void (*open)(int fd);\n"
+                               "    int (*cmp)(const void *, const void *);\n"
+                               "    char *(*name_of)(int id);\n"
+                               "    void (*handlers[4])(void);\n"
+                               "};\n",
+                               CBM_LANG_C, "t", "ops.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.flags"));
+    /* RED before the fix: none of the four pointer-to-function members. */
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.open"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.cmp"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.name_of"));
+    ASSERT_TRUE(has_def_qn(r, "t.ops.Ops.handlers"));
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 5);
+    /* Each carries a type text, which the cross-file registry needs to list
+     * it among its struct's fields. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Field") == 0) {
+            ASSERT_NOT_NULL(d->return_type);
+            ASSERT_TRUE(d->return_type[0] != '\0');
+        }
+    }
+    cbm_free_result(r);
+
+    /* A C++ member function DECLARATION stays out of the fields; a
+     * pointer-to-function member beside it is one. */
+    r = extract("class Widget {\n"
+                "public:\n"
+                "    void resize(int w);\n"
+                "    int (*hook)(int);\n"
+                "    int width;\n"
+                "};\n",
+                CBM_LANG_CPP, "t", "widget.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Field", "hook"));
+    ASSERT_TRUE(has_def(r, "Field", "width"));
+    ASSERT_FALSE(has_def(r, "Field", "resize"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* return_type of the first definition named `name`; NULL when there is no such
  * definition or it carries no return type. */
 static const char *def_return_type(CBMFileResult *r, const char *name) {
@@ -1079,6 +1176,103 @@ static const char *def_return_type(CBMFileResult *r, const char *name) {
         }
     }
     return NULL;
+}
+
+/* A member's name is the identifier at the bottom of its declarator, and its
+ * type is everything around that identifier, in the canonical spelling of the
+ * function return types below. Taking the first declarator's first child as
+ * the name published members called `*argv` and `seen[8]`, which no member
+ * access can ever match; taking only the `type` node typed `struct Node *next`
+ * as a struct, so `list->next[i]` had no element type; and of
+ * `struct Node *next, *prev;` only `next` existed. */
+TEST(extract_c_member_declarators_name_and_type) {
+    CBMFileResult *r = extract("struct Shapes {\n"
+                               "    char **argv;\n"
+                               "    int seen[8];\n"
+                               "    struct Node *next, *prev;\n"
+                               "    int a, b;\n"
+                               "    const char *label;\n"
+                               "    unsigned flags : 3;\n"
+                               "    char *const fixed;\n"
+                               "    char *names[4];\n"
+                               "    int plain;\n"
+                               "};\n",
+                               CBM_LANG_C, "t", "shapes.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the fix: `*argv`, `seen[8]`, `*next`, `*label`, `*names[4]`
+     * as names, and no `prev` / `b` at all. */
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 11);
+    ASSERT_STR_EQ(def_return_type(r, "argv"), "char **");
+    ASSERT_STR_EQ(def_return_type(r, "seen"), "int [8]");
+    ASSERT_STR_EQ(def_return_type(r, "next"), "struct Node *");
+    ASSERT_STR_EQ(def_return_type(r, "prev"), "struct Node *");
+    ASSERT_STR_EQ(def_return_type(r, "a"), "int");
+    ASSERT_STR_EQ(def_return_type(r, "b"), "int");
+    ASSERT_STR_EQ(def_return_type(r, "label"), "const char *");
+    ASSERT_STR_EQ(def_return_type(r, "flags"), "unsigned");
+    ASSERT_STR_EQ(def_return_type(r, "fixed"), "char *const");
+    ASSERT_STR_EQ(def_return_type(r, "names"), "char *[4]");
+    ASSERT_STR_EQ(def_return_type(r, "plain"), "int");
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Field") == 0) {
+            ASSERT_NULL(strpbrk(d->name, "*[]() "));
+        }
+    }
+    cbm_free_result(r);
+
+    /* Pointer-to-function members spell their type the way C does. */
+    r = extract("struct Ops {\n"
+                "    void (*open)(int fd);\n"
+                "    char *(*name_of)(int id);\n"
+                "    void (*handlers[4])(void);\n"
+                "    int (*cmp)(const void *,\n"
+                "               const void *);\n"
+                "};\n",
+                CBM_LANG_C, "t", "ops.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(def_return_type(r, "open"), "void (*)(int fd)");
+    ASSERT_STR_EQ(def_return_type(r, "name_of"), "char *(*)(int id)");
+    ASSERT_STR_EQ(def_return_type(r, "handlers"), "void (*[4])(void)");
+    ASSERT_STR_EQ(def_return_type(r, "cmp"), "int (*)(const void *, const void *)");
+    cbm_free_result(r);
+
+    /* C++: a reference member, and member functions stay out. */
+    r = extract("class Widget {\n"
+                "public:\n"
+                "    Widget *parent, *child;\n"
+                "    const Text &title;\n"
+                "    int *ids() const;\n"
+                "    void (resize)(int w);\n"
+                "};\n",
+                CBM_LANG_CPP, "t", "widget.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 3);
+    ASSERT_STR_EQ(def_return_type(r, "parent"), "Widget *");
+    ASSERT_STR_EQ(def_return_type(r, "child"), "Widget *");
+    ASSERT_STR_EQ(def_return_type(r, "title"), "const Text &");
+    cbm_free_result(r);
+
+    /* A member whose type is a macro invocation (jemalloc's
+     * `ql_head(tcache_slow_t) tcache_ql;`): the member is `tcache_ql`, never
+     * the macro's argument. Both grammars: a header is parsed as C++. */
+    static const CBMLanguage macro_langs[] = {CBM_LANG_C, CBM_LANG_CPP};
+    for (size_t li = 0; li < sizeof(macro_langs) / sizeof(macro_langs[0]); li++) {
+        r = extract("struct arena_s {\n"
+                    "    ql_head(tcache_slow_t) tcache_ql;\n"
+                    "    malloc_mutex_t mtx;\n"
+                    "};\n",
+                    macro_langs[li], "t", "arena.h");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(has_def(r, "Field", "tcache_slow_t"));
+        ASSERT_FALSE(has_def(r, "Field", "(tcache_slow_t)"));
+        ASSERT_TRUE(has_def(r, "Field", "tcache_ql"));
+        ASSERT_STR_EQ(def_return_type(r, "tcache_ql"), "ql_head(tcache_slow_t)");
+        ASSERT_TRUE(has_def(r, "Field", "mtx"));
+        cbm_free_result(r);
+    }
+    PASS();
 }
 
 /* PR #1245: the C grammar splits a declared return type across the `type` node,
@@ -3565,6 +3759,32 @@ TEST(go_cgo_pseudo_import_dropped) {
     PASS();
 }
 
+/* A Bash script imports the files it sources and nothing else. Every top-level
+ * command used to be read as an import of its command name (`set -e` imported
+ * "set", `source x.sh` imported "source"), which the import resolver bound to
+ * any project symbol of that name; the sourced paths themselves were lost. */
+TEST(bash_imports_are_sourced_files_only) {
+    CBMFileResult *r = extract("#!/usr/bin/env bash\nset -euo pipefail\nsource ./lib/util.sh\n"
+                               ". \"$DIR/other.sh\"\ncd build\nmake all\n"
+                               "if true; then\n  source nested.sh\nfi\n",
+                               CBM_LANG_BASH, "t", "run.sh");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(r->imports.count, 3);
+    ASSERT(has_import(r, "lib/util.sh"));
+    ASSERT(has_import(r, "other.sh"));
+    ASSERT(has_import(r, "nested.sh"));
+    static const char *const commands[] = {"set", "source", ".", "cd", "make"};
+    for (int i = 0; i < r->imports.count; i++) {
+        ASSERT_NOT_NULL(r->imports.items[i].module_path);
+        for (size_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c++) {
+            ASSERT_TRUE(strcmp(r->imports.items[i].module_path, commands[c]) != 0);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #1935: Go struct fields were never extracted — find_class_body() returns the
  * struct_type node, whose only named child is a field_declaration_list, so the
  * member loop matched nothing and every field was silently skipped (0 Field
@@ -3652,6 +3872,50 @@ TEST(c_imports) {
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
     ASSERT(has_import(r, "stdio.h"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Every header keeps its includes inside its include guard, and plenty of
+ * sources include behind `#ifdef`. Reading only the top level of the file
+ * left a guarded header with no imports at all. */
+TEST(c_imports_inside_preprocessor_blocks) {
+    static const CBMLanguage langs[] = {CBM_LANG_C, CBM_LANG_CPP};
+    for (size_t li = 0; li < sizeof(langs) / sizeof(langs[0]); li++) {
+        CBMFileResult *r = extract("#ifndef GUARD_H\n"
+                                   "#define GUARD_H\n"
+                                   "#include \"first.h\"\n"
+                                   "#include <second.h>\n"
+                                   "#if defined(USE_X)\n"
+                                   "#include \"x_only.h\"\n"
+                                   "#elif defined(USE_Z)\n"
+                                   "#include \"z_only.h\"\n"
+                                   "#else\n"
+                                   "#include \"y_only.h\"\n"
+                                   "#endif\n"
+                                   "int guarded(void);\n"
+                                   "#endif\n",
+                                   langs[li], "t", "guard.h");
+        ASSERT_NOT_NULL(r);
+        ASSERT(has_import(r, "first.h"));
+        ASSERT(has_import(r, "second.h"));
+        ASSERT(has_import(r, "x_only.h"));
+        ASSERT(has_import(r, "z_only.h"));
+        ASSERT(has_import(r, "y_only.h"));
+        ASSERT_EQ(r->imports.count, 5);
+        cbm_free_result(r);
+    }
+    /* Top-level includes come out once, as before. */
+    CBMFileResult *r = extract("#include \"top.h\"\n"
+                               "#ifdef WITH_EXTRA\n"
+                               "#include \"extra.h\"\n"
+                               "#endif\n"
+                               "int f(void) { return 0; }\n",
+                               CBM_LANG_C, "t", "top.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(r->imports.count, 2);
+    ASSERT(has_import(r, "top.h"));
+    ASSERT(has_import(r, "extra.h"));
     cbm_free_result(r);
     PASS();
 }
@@ -4452,6 +4716,77 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* Distilled from PR #1245 (Andrew Hundt): unittest.mock's `@patch("x")` is a
+ * bare decorator whose name collides with the HTTP verb, and its only argument
+ * is a dotted target, not a path. The "/" fallback then minted a Route handler
+ * PATCH "/" for every mocked test function. Rule: a decorator call WITH
+ * arguments but no path-shaped one is not a route. */
+TEST(extract_python_mock_patch_is_not_route) {
+    CBMFileResult *r = extract("from unittest.mock import patch\n\n"
+                               "@patch(\"subprocess.run\")\n"
+                               "def test_cmd(mock_run):\n"
+                               "    pass\n\n"
+                               "@app.patch(\"/items/{id}\")\n"
+                               "def update_item():\n"
+                               "    pass\n",
+                               CBM_LANG_PYTHON, "t", "test_routes.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMDefinition *mocked = find_def_by_name(r, "test_cmd");
+    ASSERT_NOT_NULL(mocked);
+    ASSERT_NULL(mocked->route_path);
+    ASSERT_NULL(mocked->route_method);
+
+    const CBMDefinition *route = find_def_by_name(r, "update_item");
+    ASSERT_NOT_NULL(route);
+    ASSERT_STR_EQ(route->route_path, "/items/{id}");
+    ASSERT_STR_EQ(route->route_method, "PATCH");
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Companion to the mock-patch case: the narrowing must not cost real routes.
+ * A receiver-less framework decorator with a path-shaped argument (Litestar /
+ * BlackSheep `@get("/x")`) stays a route, `@mock.patch("x")` (receiver, but
+ * no path) is not one, and a zero-argument `@app.route()` keeps the "/"
+ * default main emits today. */
+TEST(extract_python_bare_decorator_route_rules) {
+    CBMFileResult *r = extract("from litestar import get\n"
+                               "from unittest import mock\n\n"
+                               "@get(\"/health\")\n"
+                               "def health():\n"
+                               "    pass\n\n"
+                               "@mock.patch(\"os.getcwd\")\n"
+                               "def test_cwd(mock_cwd):\n"
+                               "    pass\n\n"
+                               "@app.route()\n"
+                               "def index():\n"
+                               "    pass\n",
+                               CBM_LANG_PYTHON, "t", "routes.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMDefinition *health = find_def_by_name(r, "health");
+    ASSERT_NOT_NULL(health);
+    ASSERT_STR_EQ(health->route_path, "/health");
+    ASSERT_STR_EQ(health->route_method, "GET");
+
+    const CBMDefinition *mocked = find_def_by_name(r, "test_cwd");
+    ASSERT_NOT_NULL(mocked);
+    ASSERT_NULL(mocked->route_path);
+    ASSERT_NULL(mocked->route_method);
+
+    const CBMDefinition *index = find_def_by_name(r, "index");
+    ASSERT_NOT_NULL(index);
+    ASSERT_STR_EQ(index->route_path, "/");
+    ASSERT_STR_EQ(index->route_method, "ANY");
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── ArkTS (HarmonyOS .ets) ─────────────────────────────────────── */
 
 TEST(arkts_component_struct) {
@@ -5011,10 +5346,11 @@ TEST(swift_non_url_constructor_untouched_issue1892) {
  * the per-file constant map and resolved at the call site, for both return
  * statements and arrow expression bodies. */
 TEST(extract_ts_await_generic_call_issue2210) {
-    CBMFileResult *r = extract("function parseJsonBody<T>() { return {} as T; }\n"
-                               "async function plain() { return await parseJsonBody(); }\n"
-                               "async function generic() { return await parseJsonBody<string>(); }\n",
-                               CBM_LANG_TYPESCRIPT, "t", "await.ts");
+    CBMFileResult *r =
+        extract("function parseJsonBody<T>() { return {} as T; }\n"
+                "async function plain() { return await parseJsonBody(); }\n"
+                "async function generic() { return await parseJsonBody<string>(); }\n",
+                CBM_LANG_TYPESCRIPT, "t", "await.ts");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_EQ(count_calls_named(r, "parseJsonBody"), 2);
@@ -10068,6 +10404,9 @@ SUITE(extraction) {
     RUN_TEST(c_function_return_type_preserves_pointer_and_qualifier);
     RUN_TEST(c_function_return_type_plain_unchanged);
     RUN_TEST(c_struct);
+    RUN_TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef);
+    RUN_TEST(extract_c_function_pointer_member_is_a_field);
+    RUN_TEST(extract_c_member_declarators_name_and_type);
     RUN_TEST(cpp_class);
     RUN_TEST(cpp_method_return_type_preserves_pointer_and_qualifier);
 
@@ -10242,10 +10581,12 @@ SUITE(extraction) {
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
     RUN_TEST(go_cgo_pseudo_import_dropped);
+    RUN_TEST(bash_imports_are_sourced_files_only);
     RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
     RUN_TEST(c_imports);
+    RUN_TEST(c_imports_inside_preprocessor_blocks);
     RUN_TEST(ruby_imports);
     RUN_TEST(lua_imports);
     RUN_TEST(import_stress_go);
@@ -10294,6 +10635,8 @@ SUITE(extraction) {
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(extract_python_mock_patch_is_not_route);
+    RUN_TEST(extract_python_bare_decorator_route_rules);
     RUN_TEST(arkts_component_struct);
     RUN_TEST(arkts_exported_struct_decorators);
     RUN_TEST(arkts_member_decorators);

@@ -22,6 +22,7 @@
 #include "lsp/rust_lsp.h"
 #include "preprocessor.h"
 #include "sql_values.h" // #1735: literal INSERT rows kept out of the SQL parse
+#include "cpp_branch_views.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"  // cbm_fopen — crash-supervisor per-file marker write
 #include "foundation/hash_table.h" // CBMHashTable — crash-supervisor quarantine set
@@ -1433,6 +1434,26 @@ static void cbm_mark_pp_error_rows(TSNode n, uint8_t *rows, uint32_t row_count, 
     }
 }
 
+/* The ONE line counter for a source buffer (#1967). Every caller that asks
+ * "how many lines does this file have" uses it, so the coverage report never
+ * holds two answers for the same buffer.
+ *
+ * Convention: a '\n' TERMINATES a line; it does not open a new one. So the
+ * count is the number of '\n' that have at least one byte after them, plus
+ * one. "a\nb" and "a\nb\n" both have 2 lines (the trailing newline adds no
+ * phantom empty line, matching what an editor shows); "a\nb" without a final
+ * newline still counts its last line. An empty buffer counts as 1 line, because
+ * tree-sitter still reports row 0 for it and 1-based line maps index line 1. */
+uint32_t cbm_source_line_count(const char *src, int src_len) {
+    uint32_t n = 1;
+    for (int i = 0; i + 1 < src_len; i++) {
+        if (src[i] == '\n') {
+            n++;
+        }
+    }
+    return n;
+}
+
 /* Recovery subtraction (#963): tree-sitter error recovery plus the
  * ERROR-descending def walker often still extract constructs INSIDE a failed
  * region (verified: a function in an #ifdef-split ERROR region and even a
@@ -1450,12 +1471,7 @@ static void cbm_mark_pp_error_rows(TSNode n, uint8_t *rows, uint32_t row_count, 
  * Now the uncovered gaps are reported instead, and a gap holding only blank,
  * comment or preprocessor lines is not a miss at all. */
 static uint32_t *cbm_line_offsets(const char *src, int src_len, uint32_t *out_lines) {
-    uint32_t lines = 1;
-    for (int i = 0; i < src_len; i++) {
-        if (src[i] == '\n') {
-            lines++;
-        }
-    }
+    uint32_t lines = cbm_source_line_count(src, src_len);
     uint32_t *offs =
         (uint32_t *)cbm_alloc(CBM_MEM_CLASS_EXTRACT, (size_t)(lines + 1) * sizeof(uint32_t));
     if (!offs) {
@@ -2060,18 +2076,6 @@ static void cbm_refine_regions_with_pp_lines(cbm_error_regions_t *regs, const ui
  * this repo covers 25.5% of its file, and the next widest 3.9%. */
 #define CBM_UNUSABLE_PCT 80
 
-/* Number of 1-based lines in `src`. A file that does not end with a newline
- * still has a last line, so the count is separators plus one. */
-static uint32_t cbm_count_lines(const char *src, int src_len) {
-    uint32_t n = 1;
-    for (int i = 0; i < src_len; i++) {
-        if (src[i] == '\n' && i + 1 < src_len) {
-            n++;
-        }
-    }
-    return n;
-}
-
 /* Serialize collected regions as "start-end,start-end,...", with a trailing
  * ",+<N>" when the cap threw N ranges away.
  *
@@ -2584,13 +2588,110 @@ static bool cbm_sql_values_exclusion_on(const char *rel_path) {
     return true;
 }
 
+/* Drop the entries a branch view re-extracted from code outside the
+ * conditionals: a definition with a QN the file already has at the same line,
+ * an import with the same name and path. */
+static void cpp_view_drop_seen(CBMFileResult *r, int defs_before, int imports_before) {
+    int w = defs_before;
+    for (int i = defs_before; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        bool seen = false;
+        for (int j = 0; j < w && !seen; j++) {
+            const CBMDefinition *e = &r->defs.items[j];
+            seen = e->start_line == d->start_line && e->qualified_name && d->qualified_name &&
+                   strcmp(e->qualified_name, d->qualified_name) == 0;
+        }
+        if (!seen) {
+            r->defs.items[w++] = *d;
+        }
+    }
+    r->defs.count = w;
+    w = imports_before;
+    for (int i = imports_before; i < r->imports.count; i++) {
+        const CBMImport *m = &r->imports.items[i];
+        bool seen = false;
+        for (int j = 0; j < w && !seen; j++) {
+            const CBMImport *e = &r->imports.items[j];
+            seen = e->local_name && m->local_name && e->module_path && m->module_path &&
+                   strcmp(e->local_name, m->local_name) == 0 &&
+                   strcmp(e->module_path, m->module_path) == 0;
+        }
+        if (!seen) {
+            r->imports.items[w++] = *m;
+        }
+    }
+    r->imports.count = w;
+}
+
+/* Haskell: the scanner parses the first branch of an #if group and swallows
+ * the rest up to #endif as one token, so what is written once per
+ * configuration (a definition, an import, a call in the other branch) was
+ * seen in its first variant only. Every further branch is parsed as its own
+ * view (cpp_branch_views.h: same bytes and lines, the other branches and the
+ * conditional lines blanked) and extracted into the same result, under the
+ * raw parse's budget. A definition at another line under a QN the file
+ * already has is that definition's variant; the graph keeps one identity with
+ * both spans. Calls and usages outside the conditionals come back as
+ * duplicates, which the pipeline dedups by caller and callee. The raw parse
+ * alone decides the file's parse status. */
+static void extract_cpp_branch_views(const CBMExtractCtx *raw, const TSLanguage *ts_lang,
+                                     int64_t timeout_micros) {
+    int views = cbm_cpp_branch_view_count(raw->arena, raw->source, raw->source_len);
+    for (int v = 1; v <= views; v++) {
+        char *view = cbm_cpp_branch_view(raw->arena, raw->source, raw->source_len, v);
+        TSParser *parser = view ? get_thread_parser(ts_lang, raw->language) : NULL;
+        if (!parser) {
+            return;
+        }
+        ts_parser_reset(parser);
+        CBMStringInput input = {view, (uint32_t)raw->source_len};
+        TSInput ts_input = {&input, cbm_string_read, TSInputEncodingUTF8, NULL};
+        TSParseOptions opts = {0};
+        CBMParseBudget budget = {0}; // cppcheck-suppress unreadVariable
+        if (timeout_micros > 0) {
+            uint64_t budget_ns = (uint64_t)timeout_micros * USEC_TO_NSEC;
+            budget.cpu_deadline_ns = cbm_thread_cpu_time_ns() + budget_ns;
+            budget.wall_ceiling_ns = now_ns() + budget_ns * CBM_PARSE_WALL_CEILING_FACTOR;
+            opts.payload = &budget;
+            opts.progress_callback = cbm_timeout_cb;
+        }
+        TSTree *tree = ts_parser_parse_with_options(parser, NULL, ts_input, opts);
+        if (!tree) {
+            return;
+        }
+        CBMExtractCtx vctx = {
+            .arena = raw->arena,
+            .scratch = raw->scratch,
+            .result = raw->result,
+            .source = view,
+            .source_len = raw->source_len,
+            .language = raw->language,
+            .project = raw->project,
+            .rel_path = raw->rel_path,
+            .module_qn = raw->module_qn,
+            .root = ts_tree_root_node(tree),
+            .macro_table = raw->macro_table,
+            .return_type_table = raw->return_type_table,
+            .walk_budget_nodes = cbm_walk_max_nodes(),
+        };
+        int defs_before = raw->result->defs.count;
+        int imports_before = raw->result->imports.count;
+        cbm_extract_definitions(&vctx);
+        cbm_extract_imports(&vctx);
+        cbm_extract_unified(&vctx);
+        cpp_view_drop_seen(raw->result, defs_before, imports_before);
+        ts_tree_delete(tree);
+    }
+}
+
 static CBMFileResult *extract_file_ex_body(const char *source, int source_len, CBMLanguage language,
                                            const char *project, const char *rel_path,
                                            int64_t timeout_micros, const char **extra_defines,
                                            const char **include_paths,
                                            const CBMMacroTable *macro_table,
                                            const CBMReturnTypeTable *return_type_table,
-                                           CBMArena *scratch) {
+                                           CBMArena *scratch,
+                                           const cbm_test_declarations_t *test_declarations) {
     // Allocate result on heap (arena inside for all string data)
     CBMFileResult *result = cbm_result_alloc();
     if (!result) {
@@ -2599,6 +2700,9 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 
     cbm_work_arena_take(&result->arena);
     CBMArena *a = &result->arena;
+    if (!cbm_test_declarations_validate(result, test_declarations)) {
+        return result;
+    }
 
     /* Crash-quarantine hard guard (Stage 3c): a file the supervisor pinned as a
      * crasher must NEVER be parsed again. Return a clean empty result BEFORE the
@@ -2777,13 +2881,19 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
         .macro_table = macro_table,
         .return_type_table = return_type_table,
         .walk_budget_nodes = cbm_walk_max_nodes(),
+        .test_declarations = test_declarations,
+        .test_declarations_raw_source = true,
     };
 
     // Run extractors: defs + imports use separate walks (unique recursion patterns),
     // then a single unified cursor walk handles the remaining 7 extractors.
     cbm_extract_definitions(&ctx);
+    cbm_test_declarations_finish(&ctx);
     cbm_extract_imports(&ctx);
     cbm_extract_unified(&ctx);
+    if (cbm_lang_needs_cpp_branch_views(language)) {
+        extract_cpp_branch_views(&ctx, ts_lang, timeout_micros);
+    }
     result->tree_nodes = ts_node_descendant_count(root);
     result->walk_nodes_visited = ctx.walk_nodes_visited;
     if (ctx.walk_budget_exhausted) {
@@ -2816,8 +2926,20 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
             cbm_run_go_lsp(a, result, source, source_len, root);
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-            cbm_run_c_lsp(a, result, source, source_len, root, language != CBM_LANG_C,
-                          CBM_SOURCE_ORIGIN_RAW);
+            if (!cbm_run_c_lsp_with_test_owners(a, result, source, source_len, root,
+                                                language != CBM_LANG_C, CBM_SOURCE_ORIGIN_RAW,
+                                                result)) {
+                result->has_error = true;
+                if (result->test_declarations_status == CBM_TEST_EXTRACT_OK) {
+                    result->test_declarations_status = CBM_TEST_EXTRACT_UNSUPPORTED_FORM;
+                    result->test_declaration_index = -1;
+                    result->test_declaration_line = 0;
+                    result->error_msg =
+                        cbm_arena_strdup(a, "configured owner source identity mismatch");
+                    if (!result->error_msg)
+                        result->test_declarations_status = CBM_TEST_EXTRACT_OOM;
+                }
+            }
         }
         if (language == CBM_LANG_PHP) {
             cbm_run_php_lsp(a, result, source, source_len, root);
@@ -2928,6 +3050,10 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
                         .rel_path = rel_path,
                         .module_qn = result->module_qn,
                         .root = pp_root,
+                        /* Preset switches still apply, but expanded bytes
+                         * cannot acquire a raw configured definition identity. */
+                        .test_declarations = test_declarations,
+                        .test_declarations_raw_source = false,
                     };
                     // Re-run unified extraction on expanded source.
                     // This adds macro-expanded calls; duplicates with original calls are
@@ -3183,12 +3309,7 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
                      * total loss (root is ERROR), because then it vouches for
                      * nothing and there is no refinement to make. */
                     if (strcmp(ts_node_type(pp_root), "ERROR") != 0) {
-                        uint32_t orig_lines = 1;
-                        for (int ci = 0; ci < source_len; ci++) {
-                            if (source[ci] == '\n') {
-                                orig_lines++;
-                            }
-                        }
+                        uint32_t orig_lines = cbm_source_line_count(source, source_len);
                         uint8_t *map = (uint8_t *)cbm_arena_alloc(a, (size_t)orig_lines + 2);
                         int exp_lines = preprocessed->expanded_line_count;
                         uint8_t *bad_rows =
@@ -3389,7 +3510,7 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
              * so the report can say "read the source" instead. See
              * parse_unusable in cbm.h for which files land here and why. */
             if (regs.count == 1 && regs.dropped == 0) {
-                uint32_t total = cbm_count_lines(source, source_len);
+                uint32_t total = cbm_source_line_count(source, source_len);
                 uint32_t span = regs.ends[0] - regs.starts[0] + 1;
                 if (total > 0 && span * 100 >= total * CBM_UNUSABLE_PCT) {
                     result->parse_unusable = true;
@@ -3499,6 +3620,16 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
                                    int64_t timeout_micros, const char **extra_defines,
                                    const char **include_paths, const CBMMacroTable *macro_table,
                                    const CBMReturnTypeTable *return_type_table) {
+    return cbm_extract_file_ex_with_tests(source, source_len, language, project, rel_path,
+                                          timeout_micros, extra_defines, include_paths, macro_table,
+                                          return_type_table, NULL);
+}
+
+CBMFileResult *cbm_extract_file_ex_with_tests(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations) {
     CBMArena scratch;
     if (tl_scratch_live && tl_scratch_slot) {
         scratch = *tl_scratch_slot;
@@ -3507,9 +3638,9 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     } else {
         cbm_arena_init_lazy(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
     }
-    CBMFileResult *result = extract_file_ex_body(source, source_len, language, project, rel_path,
-                                                 timeout_micros, extra_defines, include_paths,
-                                                 macro_table, return_type_table, &scratch);
+    CBMFileResult *result = extract_file_ex_body(
+        source, source_len, language, project, rel_path, timeout_micros, extra_defines,
+        include_paths, macro_table, return_type_table, &scratch, test_declarations);
     /* !tl_scratch_live: a nested extraction (an embedded language inside this
      * file) may already have parked its own; never overwrite it. */
     /* Kept up to CBM_EXTRACT_SCRATCH_KEEP_BYTES, grown blocks included: the
@@ -3530,6 +3661,7 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     } else {
         cbm_arena_destroy(&scratch);
     }
+    cbm_test_declarations_degrade(result);
     return result;
 }
 

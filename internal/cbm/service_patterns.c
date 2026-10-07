@@ -577,6 +577,11 @@ static const method_suffix_t route_reg_suffixes[] = {
     {".add_route", "ANY"},
     {".add_api_route", "ANY"},
     {".add_api_websocket_route", "ANY"},
+    /* FastAPI/Starlette WebSocket decorators (`@router.websocket('/ws')`,
+     * `@app.websocket_route('/events')`): not an HTTP verb, so ANY — mirrors
+     * .add_api_websocket_route above (#1245). */
+    {".websocket", "ANY"},
+    {".websocket_route", "ANY"},
     {NULL, NULL},
 };
 
@@ -757,9 +762,9 @@ static bool has_filesystem_extension(const char *path) {
     ext[ext_len] = '\0';
 
     static const char *const hard_file_exts[] = {
-        ".cfg",  ".conf",   ".credentials", ".crt",  ".db",         ".env",
-        ".ini",  ".key",    ".pem",         ".pid",  ".properties", ".service",
-        ".sock", ".socket", ".sqlite",      ".toml", NULL};
+        ".cfg",  ".conf",   ".credentials", ".crt",  ".db",  ".env",        ".ini", ".key",
+        ".log",  ".md",     ".pdf",         ".pem",  ".pid", ".properties", ".rst", ".service",
+        ".sock", ".socket", ".sqlite",      ".toml", ".txt", NULL};
     for (int i = 0; hard_file_exts[i]; i++) {
         if (path_ext_matches(ext, hard_file_exts[i])) {
             return true;
