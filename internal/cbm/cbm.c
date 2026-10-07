@@ -2267,8 +2267,6 @@ static void extract_cpp_branch_views(const CBMExtractCtx *raw, const TSLanguage 
             return;
         }
         ts_parser_reset(parser);
-        CBMStringInput input = {view, (uint32_t)raw->source_len};
-        TSInput ts_input = {&input, cbm_string_read, TSInputEncodingUTF8, NULL};
         TSParseOptions opts = {0};
         CBMParseBudget budget = {0}; // cppcheck-suppress unreadVariable
         if (timeout_micros > 0) {
@@ -2278,7 +2276,9 @@ static void extract_cpp_branch_views(const CBMExtractCtx *raw, const TSLanguage 
             opts.payload = &budget;
             opts.progress_callback = cbm_timeout_cb;
         }
-        TSTree *tree = ts_parser_parse_with_options(parser, NULL, ts_input, opts);
+        /* A view keeps the raw source's length and line structure, so it is
+         * parsed under the same terminated-last-line rule (#2078). */
+        TSTree *tree = cbm_parse_source(parser, view, (uint32_t)raw->source_len, opts);
         if (!tree) {
             return;
         }
