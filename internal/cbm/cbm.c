@@ -2571,10 +2571,10 @@ static void cbm_rescue_defs_from_projection(CBMExtractCtx *raw_ctx, const TSLang
     TSTree *tree = NULL;
     if (parser) {
         ts_parser_reset(parser);
-        CBMStringInput input = {projected, (uint32_t)raw_ctx->source_len};
-        TSInput ts_input = {&input, cbm_string_read, TSInputEncodingUTF8, NULL};
         TSParseOptions opts = {0};
-        tree = ts_parser_parse_with_options(parser, NULL, ts_input, opts);
+        /* The projection keeps the raw source's length and line structure,
+         * so it is parsed under the same terminated-last-line rule (#2078). */
+        tree = cbm_parse_source(parser, projected, (uint32_t)raw_ctx->source_len, opts);
     }
     CBMHashTable *held = tree ? cbm_ht_create(CBM_SZ_256) : NULL;
     if (held) {
