@@ -7379,27 +7379,9 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
             }
             break;
         }
-        case CBM_LANG_C:
-        case CBM_LANG_CPP: { // `typedef struct { … } Name;`: the aggregate is
-                             // anonymous and the typedef's declarator names it.
-                             // A pointer/array/function declarator names another
-                             // type, not the aggregate, so only a plain
-                             // type_identifier counts.
-            if (strcmp(kind, "struct_specifier") != 0 && strcmp(kind, "union_specifier") != 0 &&
-                strcmp(kind, "enum_specifier") != 0) {
-                break;
-            }
-            TSNode parent = ts_node_parent(node);
-            if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "type_definition") != 0) {
-                break;
-            }
-            TSNode declarator = ts_node_child_by_field_name(parent, TS_FIELD("declarator"));
-            if (!ts_node_is_null(declarator) &&
-                strcmp(ts_node_type(declarator), "type_identifier") == 0) {
-                name_node = declarator;
-            }
-            break;
-        }
+        /* C/C++ `typedef struct { … } Name;` is named by extract_c_typedef from
+         * the type_definition; naming the anonymous specifier here as well
+         * emitted Name twice (members twice, a false variant). */
         default:
             break;
         }
