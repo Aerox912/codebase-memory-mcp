@@ -271,7 +271,9 @@ typedef struct {
      * (`#if`/`#else` twins, a macro redefined per platform, overloads): the
      * graph keeps one node per QN, and this lists every one of those
      * definitions' line spans, the surviving one included, as a JSON array
-     * sorted by start line: [{"start":10,"end":14},{"start":20,"end":26}].
+     * sorted by start line, in graph_buffer.c's variants schema:
+     * [{"file_path":"a.c","start_line":10,"end_line":14},
+     *  {"file_path":"a.c","start_line":20,"end_line":26}].
      * Carried by the definition the graph keeps for the file (the last by
      * start line), which makes it the node's `variants` property. NULL on
      * every other definition, and in every language outside

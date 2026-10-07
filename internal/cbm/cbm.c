@@ -26,12 +26,14 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"  // cbm_fopen — crash-supervisor per-file marker write
 #include "foundation/hash_table.h" // CBMHashTable — crash-supervisor quarantine set
+#include "foundation/str_util.h"   // cbm_json_escape — variants file_path
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
 #include "mimalloc.h" // mi_malloc/mi_calloc/mi_realloc/mi_free/mi_usable_size — bind 3rd-party allocators (#424)
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include "sqlite3.h" // sqlite3_mem_methods, sqlite3_config, SQLITE_CONFIG_MALLOC — bind sqlite to mimalloc
 #endif
+#include <limits.h> // INT_MAX
 #include <stdint.h> // uint32_t, uint64_t, int64_t
 #include <stdlib.h>
 #include <string.h>
@@ -2165,7 +2167,9 @@ static uint64_t cbm_variant_key(const char *qn, const char *label) {
 /* refs[0..n) is one (QN, label) group in span order: give every member the
  * list of the group's distinct spans. */
 static void cbm_variant_assign(CBMFileResult *result, const cbm_variant_ref_t *refs, int n) {
-    enum { VARIANT_ENTRY_MAX = 40 }; /* ,{"start":4294967295,"end":4294967295} */
+    /* ,{"file_path":"","start_line":4294967295,"end_line":4294967295} + path;
+     * cbm_json_escape writes at most 6 bytes per source byte (\u00XX). */
+    enum { VARIANT_ENTRY_FIXED = 64, JSON_ESCAPE_GROWTH = 6 };
     int distinct = 0;
     for (int i = 0; i < n; i++) {
         if (i == 0 || refs[i].start != refs[i - 1].start || refs[i].end != refs[i - 1].end) {
@@ -2175,7 +2179,17 @@ static void cbm_variant_assign(CBMFileResult *result, const cbm_variant_ref_t *r
     if (distinct < 2) {
         return;
     }
-    size_t cap = (size_t)distinct * VARIANT_ENTRY_MAX + 3;
+    const char *path = result->defs.items[refs[0].idx].file_path;
+    size_t path_cap = (path ? strlen(path) : 0) * JSON_ESCAPE_GROWTH + 1;
+    if (path_cap > INT_MAX) {
+        return;
+    }
+    char *esc = (char *)cbm_arena_alloc(&result->arena, path_cap);
+    if (!esc) {
+        return;
+    }
+    (void)cbm_json_escape(esc, (int)path_cap, path ? path : "");
+    size_t cap = (size_t)distinct * (VARIANT_ENTRY_FIXED + strlen(esc)) + 3;
     char *json = (char *)cbm_arena_alloc(&result->arena, cap);
     if (!json) {
         return;
@@ -2186,8 +2200,11 @@ static void cbm_variant_assign(CBMFileResult *result, const cbm_variant_ref_t *r
         if (i > 0 && refs[i].start == refs[i - 1].start && refs[i].end == refs[i - 1].end) {
             continue;
         }
-        int w = snprintf(json + pos, cap - pos, "%s{\"start\":%u,\"end\":%u}", pos > 1 ? "," : "",
-                         refs[i].start, refs[i].end);
+        /* graph_buffer.c's variants schema, so its same-QN merge and every
+         * reader of the node (the test-impact engine) see one format. */
+        int w = snprintf(json + pos, cap - pos,
+                         "%s{\"file_path\":\"%s\",\"start_line\":%u,\"end_line\":%u}",
+                         pos > 1 ? "," : "", esc, refs[i].start, refs[i].end);
         if (w <= 0 || (size_t)w >= cap - pos) {
             return; /* cannot happen: cap covers the longest entry */
         }

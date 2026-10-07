@@ -10536,9 +10536,12 @@ static c1_variants_obs_t c1_observe_variants(const char *repo, const char *db_na
         return obs;
     }
     obs.opened = true;
-    obs.pick_lists_both = c1_props_contain(
-        s, proj, "v.pick", "\"variants\":[{\"start\":2,\"end\":2},{\"start\":4,\"end\":6}]");
-    obs.limit_has_list = c1_props_contain(s, proj, "v.LIMIT#macro", "\"variants\":[{\"start\":9,");
+    obs.pick_lists_both =
+        c1_props_contain(s, proj, "v.pick",
+                         "\"variants\":[{\"file_path\":\"v.c\",\"start_line\":2,\"end_line\":2},"
+                         "{\"file_path\":\"v.c\",\"start_line\":4,\"end_line\":6}]");
+    obs.limit_has_list = c1_props_contain(s, proj, "v.LIMIT#macro",
+                                          "\"variants\":[{\"file_path\":\"v.c\",\"start_line\":9,");
     obs.once_has_list = c1_props_contain(s, proj, "v.once", "\"variants\"");
     cbm_node_t *nodes = NULL;
     int count = 0;
@@ -10680,8 +10683,10 @@ TEST(pipeline_cpp_overloads_are_listed_as_variants_c1) {
     int scale_nodes = n;
     int kept_start = n > 0 ? nodes[0].start_line : -1;
     cbm_store_free_nodes(nodes, n);
-    bool lists_both = c1_props_contain(
-        s, proj, "ov.scale", "\"variants\":[{\"start\":1,\"end\":1},{\"start\":2,\"end\":4}]");
+    bool lists_both =
+        c1_props_contain(s, proj, "ov.scale",
+                         "\"variants\":[{\"file_path\":\"ov.cpp\",\"start_line\":1,\"end_line\":1},"
+                         "{\"file_path\":\"ov.cpp\",\"start_line\":2,\"end_line\":4}]");
     bool once_has_list = c1_props_contain(s, proj, "ov.once", "\"variants\"");
 
     cbm_store_close(s);

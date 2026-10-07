@@ -7743,15 +7743,18 @@ TEST(extract_c_variants_lists_same_file_duplicates_c1) {
     ASSERT_NOT_NULL(kept);
     ASSERT_NOT_NULL(other);
     ASSERT_NOT_NULL(kept->variants);
-    ASSERT_STR_EQ(kept->variants, "[{\"start\":2,\"end\":2},{\"start\":4,\"end\":6}]");
+    ASSERT_STR_EQ(kept->variants, "[{\"file_path\":\"v.c\",\"start_line\":2,\"end_line\":2},"
+                                  "{\"file_path\":\"v.c\",\"start_line\":4,\"end_line\":6}]");
     ASSERT_NULL(other->variants); /* one carrier per group: the node the graph keeps */
 
     const CBMDefinition *lim_a = c1_def_at(r, "Macro", "LIMIT", 9);
     const CBMDefinition *lim_b = c1_def_at(r, "Macro", "LIMIT", 11);
     ASSERT_NOT_NULL(lim_a);
     ASSERT_NOT_NULL(lim_b);
-    char want[128];
-    snprintf(want, sizeof(want), "[{\"start\":%u,\"end\":%u},{\"start\":%u,\"end\":%u}]",
+    char want[256];
+    snprintf(want, sizeof(want),
+             "[{\"file_path\":\"v.c\",\"start_line\":%u,\"end_line\":%u},"
+             "{\"file_path\":\"v.c\",\"start_line\":%u,\"end_line\":%u}]",
              lim_a->start_line, lim_a->end_line, lim_b->start_line, lim_b->end_line);
     ASSERT_NOT_NULL(lim_b->variants);
     ASSERT_STR_EQ(lim_b->variants, want);
