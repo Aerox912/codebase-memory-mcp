@@ -357,6 +357,7 @@ static void cr_walk(cr_ctx_t *c, CBMFileResult *r) {
         cr_str(c, &r->resolved_calls.items[i].callee_qn);
         cr_str(c, &r->resolved_calls.items[i].strategy);
         cr_str(c, &r->resolved_calls.items[i].reason);
+        cr_str(c, &r->resolved_calls.items[i].callee_sig);
     }
     cr_array(c, (void **)&r->string_refs.items, r->string_refs.count, sizeof(CBMStringRef));
     for (int i = 0; i < r->string_refs.count && r->string_refs.items; i++) {
@@ -391,6 +392,7 @@ static void cr_walk(cr_ctx_t *c, CBMFileResult *r) {
     cr_list(c, &r->macros);
     cr_str(c, &r->error_msg);
     cr_str(c, &r->error_ranges);
+    cr_str(c, &r->module_doc);
     cr_blob(c, (const void **)&r->source, r->source ? (size_t)r->source_len + SKIP_ONE : 0);
 }
 
