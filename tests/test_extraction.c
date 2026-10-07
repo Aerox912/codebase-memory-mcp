@@ -1116,6 +1116,29 @@ TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef) {
     PASS();
 }
 
+/* The anonymous aggregate of a typedef is ONE definition. extract_c_typedef names
+ * it from the type_definition; a second naming from the anonymous specifier gave
+ * Tally two Class defs under one QN, every member twice, and a variants list. */
+TEST(extract_c_anonymous_typedef_aggregate_is_one_def) {
+    CBMFileResult *r = extract("typedef struct {\n"
+                               "    int count;\n"
+                               "} Tally;\n"
+                               "typedef enum { SHADE_RED, SHADE_GREEN } Shade;\n",
+                               CBM_LANG_C, "t", "tally.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_defs_named(r, "Class", "Tally"), 1);
+    ASSERT_EQ(count_defs_named(r, "Field", "count"), 1);
+    ASSERT_EQ(count_defs_named(r, "Enum", "Shade"), 1);
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->name && strcmp(d->name, "Tally") == 0) {
+            ASSERT_NULL(d->variants);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A pointer-to-function member (`void (*open)(int);`, the shape of every
  * kernel ops table) is a field of its struct. It shares the
  * field_declaration + function_declarator shape with a C++ member FUNCTION
@@ -10405,6 +10428,7 @@ SUITE(extraction) {
     RUN_TEST(c_function_return_type_plain_unchanged);
     RUN_TEST(c_struct);
     RUN_TEST(extract_c_anonymous_typedef_aggregate_is_named_by_its_typedef);
+    RUN_TEST(extract_c_anonymous_typedef_aggregate_is_one_def);
     RUN_TEST(extract_c_function_pointer_member_is_a_field);
     RUN_TEST(extract_c_member_declarators_name_and_type);
     RUN_TEST(cpp_class);
