@@ -1233,8 +1233,14 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
                                                cbm_file_hash_t **out, int *out_count);
 
 /* Compatibility contract persisted in coverage metadata. Increment when a
- * graph/manifest semantic change makes prior exact-input indexes unsafe. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 3 };
+ * graph/manifest semantic change makes prior exact-input indexes unsafe.
+ *   4: C-family node identities changed. A preprocessor macro's QN ends in
+ *      "#macro"; unscoped C/C++/Objective-C enumerators are `<scope>.<NAME>`
+ *      (the enum name is no longer a segment); typedef names, anonymous-enum
+ *      constants and macro-prefixed functions are nodes; a bodyless
+ *      `struct X` is no node. An index written before this holds the old
+ *      QNs for every unchanged file, so it is rebuilt in full once. */
+enum { CBM_SEMANTIC_INDEX_VERSION = 4 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;
