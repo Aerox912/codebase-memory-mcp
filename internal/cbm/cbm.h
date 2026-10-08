@@ -267,6 +267,18 @@ typedef struct {
      * HTTP_CALLS edge to base + path. Tail fields: zero-init stays valid. */
     const char *http_client;
     const char *http_base_url;
+    /* Set when this FILE holds two or more definitions with this QN and label
+     * (`#if`/`#else` twins, a macro redefined per platform, overloads): the
+     * graph keeps one node per QN, and this lists every one of those
+     * definitions' line spans, the surviving one included, as a JSON array
+     * sorted by start line, in graph_buffer.c's variants schema:
+     * [{"file_path":"a.c","start_line":10,"end_line":14},
+     *  {"file_path":"a.c","start_line":20,"end_line":26}].
+     * Carried by the definition the graph keeps for the file (the last by
+     * start line), which makes it the node's `variants` property. NULL on
+     * every other definition, and in every language outside
+     * cbm_is_c_preprocessor_lang. */
+    const char *variants;
     /* Callable identity (#2061): offset of the signature suffix inside
      * qualified_name (base QN = the first qn_sig_off bytes); 0 = no suffix.
      * Always 0 until a language enables its callable_identity mode. */
@@ -291,6 +303,17 @@ typedef struct {
 } CBMCallArg;
 
 #define CBM_MAX_CALL_ARGS 8
+
+/* The qualified name of a C-preprocessor macro (`#define NAME ...` in C, C++,
+ * CUDA, Objective-C, GLSL, ISPC) is `<module QN>.<NAME>#macro`. C keeps macros
+ * apart from ordinary identifiers, so a macro and a function, type, variable or
+ * enumerator may legally share a name in one file; the fence gives the macro
+ * an identity of its own, and the plain `<module QN>.<NAME>` always belongs to
+ * the definition. `name` stays NAME and the label stays "Macro".
+ *
+ * Tie rule for anything that resolves a NAME or a plain QN to a node: the
+ * definition is the target, and the macro only when no definition is visible. */
+#define CBM_MACRO_QN_SUFFIX "#macro"
 
 /* Byte offsets are meaningful only within the source buffer that produced
  * them. C/C++/CUDA run both raw and preprocessed extraction passes, and those
@@ -898,6 +921,14 @@ void cbm_work_arena_keep_begin(void);
 /* Free the compaction scratch this thread kept (cbm_work_arena_release calls it). */
 void cbm_result_compact_release_thread(void);
 
+/* Parse one whole file as if its last line ended with "\n" (#2078). The
+ * parser sees the source plus one virtual newline when the last byte is not
+ * already one; the returned tree is then clamped back to `source_len`, so no
+ * node range, point or text reaches past the real bytes. Every whole-file parse
+ * goes through here, so a retained tree and a fallback re-parse agree. */
+TSTree *cbm_parse_source(TSParser *parser, const char *source, uint32_t source_len,
+                         TSParseOptions opts);
+
 // Extract all data from one file. Caller must call cbm_free_result().
 // source must remain valid for the duration of the call.
 // timeout_micros: per-file tree-sitter parse budget in microseconds of the
@@ -1008,6 +1039,11 @@ void cbm_usage_field_lookup_test_reset(void);
 uint64_t cbm_usage_field_lookup_test_work(void);
 uint64_t cbm_usage_slow_parent_fallback_test_count(void);
 #endif
+
+// Number of 1-based lines in a source buffer. The single line-count convention
+// for coverage reporting (#1967): a trailing '\n' ends the last line and opens
+// no new one; an empty buffer counts as 1 line. See the definition in cbm.c.
+uint32_t cbm_source_line_count(const char *src, int src_len);
 
 // Toggle C/C++ preprocessor Macro-node extraction (#375). The pipeline enables
 // it only for full/advanced index modes (it dominates extraction on macro-dense
