@@ -3081,7 +3081,11 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         free(records);
         return cbm_mcp_text_result("out of memory while listing projects", true);
     }
-    qsort(records, (size_t)record_count, sizeof(*records), project_record_compare);
+    /* An empty cache never allocates the record array, and qsort's base is
+     * declared nonnull (glibc): skip the sort when there is nothing to order. */
+    if (record_count > 1) {
+        qsort(records, (size_t)record_count, sizeof(*records), project_record_compare);
+    }
 
     int limit = cbm_mcp_get_int_arg(args, "limit", 50);
     int offset = cbm_mcp_get_int_arg(args, "offset", 0);
@@ -6987,6 +6991,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
         }
         add_coverage_report(doc, root, store, project, have_proj_info ? proj_info.indexed_at : NULL,
                             coverage_samples);
+        (void)cbm_cross_repo_add_status_json(doc, root, store, project);
         safe_str_free(&proj_info.name);
         safe_str_free(&proj_info.indexed_at);
         safe_str_free(&proj_info.root_path);
@@ -8600,6 +8605,17 @@ static long node_resolution_score(const cbm_node_t *n) {
             label_rank = RES_RANK_OTHER;
         }
     }
+    /* Tie rule (CBM_MACRO_QN_SUFFIX): a name that is both a definition and a C
+     * macro -- a typedef or enumerator next to its rename macro -- resolves to
+     * the definition. The macro scores just under every other definition, and
+     * still above Module/File; without this a one-line typedef and its macro
+     * tie on span and the name reads as ambiguous. */
+    size_t qn_len = n->qualified_name ? strlen(n->qualified_name) : 0;
+    size_t fence_len = sizeof(CBM_MACRO_QN_SUFFIX) - SKIP_ONE;
+    if (label_rank == RES_RANK_OTHER && qn_len > fence_len &&
+        strcmp(n->qualified_name + qn_len - fence_len, CBM_MACRO_QN_SUFFIX) == 0) {
+        return RES_RANK_OTHER * (long)RES_LABEL_WEIGHT - SKIP_ONE;
+    }
     long span = (long)n->end_line - (long)n->start_line;
     if (span < 0) {
         span = 0;
@@ -10146,6 +10162,7 @@ static char *handle_cross_repo_mode(cbm_mcp_server_t *srv, const char *repo_path
     yyjson_doc_free(jdoc);
 
     if (result.no_targets || result.failed) {
+        cbm_cross_repo_result_free(&result);
         free(project);
         return cbm_mcp_text_result(
             result.no_targets
@@ -10183,9 +10200,23 @@ static char *handle_cross_repo_mode(cbm_mcp_server_t *srv, const char *repo_path
     yyjson_mut_obj_add_int(doc, root, "cross_trpc_calls", result.trpc_edges);
     yyjson_mut_obj_add_int(doc, root, "total_cross_edges", total);
     yyjson_mut_obj_add_real(doc, root, "elapsed_ms", result.elapsed_ms);
+    /* ["*"] skips stores it cannot link (#2133); name them so a partial fleet
+     * is visible instead of silently smaller. Only emitted when non-empty. */
+    if (result.skipped_count > 0) {
+        yyjson_mut_val *skipped = yyjson_mut_arr(doc);
+        for (int i = 0; i < result.skipped_count; i++) {
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "name", result.skipped_projects[i].project);
+            yyjson_mut_obj_add_str(doc, item, "reason", result.skipped_projects[i].reason);
+            yyjson_mut_obj_add_str(doc, item, "hint", "reindex this project");
+            yyjson_mut_arr_append(skipped, item);
+        }
+        yyjson_mut_obj_add_val(doc, root, "skipped_projects", skipped);
+    }
 
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
+    cbm_cross_repo_result_free(&result);
     free(project);
     char *out = cbm_mcp_text_result(json, result.cancelled);
     free(json);
@@ -13129,6 +13160,23 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
         result =
             snippet_from_tier(srv, tier_nodes, tier_count, qn, "suffix", include_neighbors, args);
     }
+
+    /* Tier 3: the C-macro namespace. A macro's QN is `<module>.<NAME>#macro`
+     * (CBM_MACRO_QN_SUFFIX), out of reach of '%.X'. Tried only when no
+     * definition answered to the name above (tie rule), for a short name, a
+     * partial QN, or the macro's plain QN. */
+    if (!result) {
+        char macro_qn[CBM_SZ_512];
+        int macro_len = snprintf(macro_qn, sizeof(macro_qn), "%s" CBM_MACRO_QN_SUFFIX, qn);
+        if (macro_len > 0 && (size_t)macro_len < sizeof(macro_qn)) {
+            tier_nodes = NULL;
+            tier_count = 0;
+            cbm_store_find_nodes_by_qn_suffix(store, effective_project, macro_qn, &tier_nodes,
+                                              &tier_count);
+            result = snippet_from_tier(srv, tier_nodes, tier_count, qn, "suffix", include_neighbors,
+                                       args);
+        }
+    }
     free(qn);
     free(project);
     if (result) {
@@ -14613,6 +14661,23 @@ static void free_file_nodes(cbm_node_t *nodes, int count) {
     free(nodes);
 }
 
+/* True when "<root_path>/<file>" resolves inside root_path. The scan stream
+ * carries whatever its walker opened: the scoped list is the index's paths,
+ * and an indexed path that passes through a directory link is a regular file
+ * to lstat, so grep reads the link's target; the recursive walker is the
+ * platform's own. This is the containment check attach_result_source already
+ * applies before it reads a result's source, applied to the match itself,
+ * once per distinct file (grep groups a file's hits). A path too long for
+ * the canonical-path buffers is one that check cannot resolve either. */
+static bool search_hit_file_within_root(const char *root_path, const char *file) {
+    char abs_path[CBM_SZ_4K];
+    int length = snprintf(abs_path, sizeof(abs_path), "%s/%s", root_path, file);
+    if (length < 0 || (size_t)length >= sizeof(abs_path)) {
+        return false;
+    }
+    return cbm_path_within_root(root_path, abs_path);
+}
+
 /* Parse and classify the complete grep stream without retaining one object per
  * hit. Graph results retain one identity per distinct node plus at most 500
  * line numbers each; raw matches retain only the caller's requested page.
@@ -14626,6 +14691,7 @@ static bool scan_and_classify_grep_matches(
     char *line = NULL;
     size_t line_capacity = 0;
     char *current_file = NULL;
+    bool current_file_inside = false;
     cbm_node_t *file_nodes = NULL;
     int file_node_count = 0;
     cbm_regex_t content_regex;
@@ -14671,12 +14737,6 @@ static bool scan_and_classify_grep_matches(
         if (has_path_filter && cbm_regexec(path_regex, file, 0, NULL, 0) != CBM_REG_OK) {
             continue;
         }
-        if (*grep_count == INT_MAX) {
-            ok = false;
-            break;
-        }
-        (*grep_count)++;
-
         if (!current_file || strcmp(current_file, file) != 0) {
             free_file_nodes(file_nodes, file_node_count);
             file_nodes = NULL;
@@ -14687,11 +14747,22 @@ static bool scan_and_classify_grep_matches(
                 ok = false;
                 break;
             }
-            if (store) {
+            current_file_inside = search_hit_file_within_root(root_path, file);
+            if (store && current_file_inside) {
                 (void)cbm_store_find_nodes_by_file(store, project, file, &file_nodes,
                                                    &file_node_count);
             }
         }
+        if (!current_file_inside) {
+            /* Every hit of a file that resolves outside the root is dropped
+             * and, like a path_filter miss, not counted. */
+            continue;
+        }
+        if (*grep_count == INT_MAX) {
+            ok = false;
+            break;
+        }
+        (*grep_count)++;
 
         grep_match_t hit = {0};
         hit.file = heap_strdup(file);
